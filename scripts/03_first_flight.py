@@ -49,10 +49,8 @@ def main() -> None:
 
     except KeyboardInterrupt:
         print("Interrupted by user.")
-
     except Exception as error:
         print(f"Error: {error}")
-
     finally:
         if has_taken_off:
             print("Attempting emergency safe landing...")

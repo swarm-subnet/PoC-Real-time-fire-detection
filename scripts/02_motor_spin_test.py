@@ -13,10 +13,9 @@ SRC_DIR = ROOT_DIR / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from tello_utils import connect_tello
+from tello_utils import connect_tello, print_query_status
 
 
-ENABLE_MOTOR_TEST = True
 SPIN_SECONDS = 3
 MIN_BATTERY_PERCENT = 20
 
@@ -27,17 +26,11 @@ def main() -> None:
 
     try:
         tello = connect_tello(wait_for_state=False)
+        print_query_status(tello)
 
-        battery = int(tello.send_read_command("battery?").strip())
-        print(f"Battery(query): {battery}%")
-
+        battery = tello.query_battery()
         if battery < MIN_BATTERY_PERCENT:
             print(f"Battery too low for motor test. Charge to at least {MIN_BATTERY_PERCENT}%.")
-            return
-
-        if not ENABLE_MOTOR_TEST:
-            print("Motor spin test is disabled by default.")
-            print("If you really want to spin the propellers without takeoff, set ENABLE_MOTOR_TEST = True.")
             return
 
         print("WARNING: The propellers will spin without taking off.")

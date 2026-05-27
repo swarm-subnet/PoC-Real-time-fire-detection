@@ -47,6 +47,17 @@ def print_basic_status(tello: Tello) -> None:
         print(f"  - {label}: {value}{suffix}")
 
 
+def print_query_status(tello: Tello) -> None:
+    """Print a small status snapshot using SDK query commands."""
+    battery = tello.query_battery()
+    height = tello.send_read_command("height?")
+    temperature = tello.send_read_command("temp?")
+
+    print(f"Battery(query): {battery}%")
+    print(f"Height(query): {height}")
+    print(f"Temperature(query): {temperature}")
+
+
 def safe_land(tello: Tello | None) -> bool:
     """Attempt to land only if the drone appears to be flying."""
     if tello is None:
