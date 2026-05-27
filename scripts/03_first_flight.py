@@ -30,16 +30,10 @@ def main() -> None:
         has_taken_off = True
 
         print("Hovering...")
-        time.sleep(2)
-
-        if ALLOW_MOVE_UP_TEST:
-            print("Moving up 20 cm...")
-            tello.move_up(20)
-        else:
-            print("Skipping upward movement test because ALLOW_MOVE_UP_TEST is False.")
+        time.sleep(5)
 
         print("Rotating clockwise 30 degrees...")
-        tello.rotate_clockwise(30)
+        tello.rotate_clockwise(180)
 
         print("Landing...")
         tello.land()
