@@ -76,6 +76,7 @@ python scripts/04_camera_preview.py
 python scripts/swarm/08_wifi_motor_spin_by_ip.py 192.168.1.101
 python scripts/swarm/08_wifi_motor_spin_by_ip.py
 python scripts/swarm/09_setup_new_drone.py
+python scripts/swarm/10_swarm_controller.py
 ```
 
 What each script does:
@@ -86,6 +87,7 @@ What each script does:
 - `04_camera_preview.py`: opens the live video stream in an OpenCV window. Press `q` to quit.
 - `swarm/08_wifi_motor_spin_by_ip.py`: tests one station-mode drone by IP, or every registered drone when no IP is passed.
 - `swarm/09_setup_new_drone.py`: configures one new drone, scans for it on the router, and adds its IP to `swarm/drone_ips.txt`.
+- `swarm/10_swarm_controller.py`: starts an interactive long-running controller for all registered drones.
 - `swarm/old/`: older step-by-step swarm setup helpers kept for reference.
 
 ## Two-Drone Wi-Fi Workflow
@@ -103,6 +105,26 @@ After drones are registered in `drone_ips.txt`, this command runs the motor test
 ```bash
 python scripts/swarm/08_wifi_motor_spin_by_ip.py
 ```
+
+For repeated testing and flight work, use the interactive swarm controller:
+
+```bash
+python scripts/swarm/10_swarm_controller.py
+```
+
+Controller commands:
+
+- `help`: show available commands.
+- `status` or `battery`: enter SDK mode and print battery/status for each registered drone.
+- `spin [seconds]`: spin all motors without takeoff, defaulting to 3 seconds.
+- `motoron`: turn motors on for all drones.
+- `motoroff`: turn motors off for all drones.
+- `takeoff`: take off all drones after checking every battery is at least 30%.
+- `land`: land all drones.
+- `emergency`: send emergency motor stop to all drones.
+- `raw <sdk command>`: send a raw Tello SDK command to all drones.
+- `one <ip> <sdk command>`: send a raw Tello SDK command to one drone.
+- `quit`: stop/land if needed and exit.
 
 ### Station-Mode UDP Note
 
