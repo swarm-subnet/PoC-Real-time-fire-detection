@@ -4,17 +4,24 @@ from __future__ import annotations
 
 import argparse
 import ipaddress
+import os
 from pathlib import Path
 import socket
+import sys
 import time
 
 
+ROOT_DIR = Path(__file__).resolve().parents[2]
+SRC_DIR = ROOT_DIR / "src"
 DEFAULT_TELLO_AP_IP = "192.168.10.1"
-DEFAULT_TARGET_SSID = "DIGIFIBRA-HU4H"
-DEFAULT_TARGET_PASSWORD = "6z5XGhK4tkYU"
 TELLO_PORT = 8889
 COMMAND_TIMEOUT_SECONDS = 7
 DRONE_IPS_FILE = Path(__file__).with_name("drone_ips.txt")
+
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
+from env_utils import load_dotenv_if_present
 
 
 def parse_args() -> argparse.Namespace:
@@ -24,8 +31,16 @@ def parse_args() -> argparse.Namespace:
             "waits for reboot, scans the router network, and appends detected IPs to drone_ips.txt."
         )
     )
-    parser.add_argument("--ssid", default=DEFAULT_TARGET_SSID, help="Router/hotspot Wi-Fi name.")
-    parser.add_argument("--password", default=DEFAULT_TARGET_PASSWORD, help="Router/hotspot Wi-Fi password.")
+    parser.add_argument(
+        "--ssid",
+        default=os.getenv("TELLO_TARGET_WIFI_SSID") or os.getenv("TELLO_TARGET_SSID") or "",
+        help="Router/hotspot Wi-Fi name. Defaults to TELLO_TARGET_WIFI_SSID or TELLO_TARGET_SSID.",
+    )
+    parser.add_argument(
+        "--password",
+        default=os.getenv("TELLO_TARGET_WIFI_PASSWORD") or os.getenv("TELLO_TARGET_PASSWORD") or "",
+        help="Router/hotspot Wi-Fi password. Defaults to TELLO_TARGET_WIFI_PASSWORD or TELLO_TARGET_PASSWORD.",
+    )
     parser.add_argument("--host", default=DEFAULT_TELLO_AP_IP, help="Drone IP while connected to its own Wi-Fi.")
     parser.add_argument("--subnet", default=None, help="Router subnet to scan, for example 192.168.1.0/24.")
     parser.add_argument("--reboot-wait", type=int, default=20, help="Seconds to wait after the ap command.")
@@ -137,9 +152,15 @@ def wait_for_reboot(seconds: int) -> None:
 
 
 def main() -> None:
+    load_dotenv_if_present(ROOT_DIR / ".env")
     args = parse_args()
 
     try:
+        if not args.skip_ap and (not args.ssid or not args.password):
+            print("Missing Wi-Fi credentials.")
+            print("Use --ssid and --password, or set TELLO_TARGET_WIFI_SSID and TELLO_TARGET_WIFI_PASSWORD.")
+            return
+
         if not args.skip_ap:
             with create_sdk_socket() as sock:
                 print(f"Connecting to new drone at {args.host}...")
@@ -153,7 +174,8 @@ def main() -> None:
 
             wait_for_reboot(args.reboot_wait)
 
-        print(f"Connect Windows to {args.ssid} now if it is not already connected.")
+        target_network = args.ssid or "the router/hotspot Wi-Fi"
+        print(f"Connect Windows to {target_network} now if it is not already connected.")
 
         known_ips = load_registered_ips()
         print(f"Currently registered IPs: {known_ips or 'none'}")

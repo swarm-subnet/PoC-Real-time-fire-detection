@@ -5,12 +5,8 @@ from __future__ import annotations
 import argparse
 import os
 
-from djitellopy import Tello
-
 
 DEFAULT_TELLO_AP_IP = "192.168.10.1"
-DEFAULT_TARGET_SSID = "DIGIFIBRA-HU4H"
-DEFAULT_TARGET_PASSWORD = "6z5XGhK4tkYU"
 
 
 def parse_args() -> argparse.Namespace:
@@ -22,12 +18,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--ssid",
-        default=os.getenv("TELLO_TARGET_SSID", DEFAULT_TARGET_SSID),
+        default=os.getenv("TELLO_TARGET_WIFI_SSID") or os.getenv("TELLO_TARGET_SSID") or "",
         help="Router/hotspot Wi-Fi name.",
     )
     parser.add_argument(
         "--password",
-        default=os.getenv("TELLO_TARGET_PASSWORD", DEFAULT_TARGET_PASSWORD),
+        default=os.getenv("TELLO_TARGET_WIFI_PASSWORD") or os.getenv("TELLO_TARGET_PASSWORD") or "",
         help="Router/hotspot Wi-Fi password.",
     )
     parser.add_argument("--host", default=DEFAULT_TELLO_AP_IP, help="Drone IP while connected to its own Wi-Fi.")
@@ -39,8 +35,10 @@ def main() -> None:
 
     if not args.ssid or not args.password:
         print("Missing Wi-Fi credentials.")
-        print("Use --ssid and --password, or set TELLO_TARGET_SSID and TELLO_TARGET_PASSWORD.")
+        print("Use --ssid and --password, or set TELLO_TARGET_WIFI_SSID and TELLO_TARGET_WIFI_PASSWORD.")
         return
+
+    from djitellopy import Tello
 
     tello = Tello(host=args.host)
 

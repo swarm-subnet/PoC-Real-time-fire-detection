@@ -77,6 +77,15 @@ python scripts/swarm/08_wifi_motor_spin_by_ip.py 192.168.1.101
 python scripts/swarm/08_wifi_motor_spin_by_ip.py
 python scripts/swarm/09_setup_new_drone.py
 python scripts/swarm/10_swarm_controller.py
+python scripts/yolo/01_detect_person_image.py captures/example.jpg
+python scripts/yolo/02_capture_tello_images.py
+python scripts/yolo/03_live_person_detection.py
+python scripts/yolo/04_live_person_detection_save_by_ip.py
+python scripts/yolo/05_human_agent_go_to_person.py --ip 192.168.1.132
+python scripts/yolo/06_chutes_frame_drill.py --stop-coverage 40
+python scripts/fire/01_detect_fire_image.py
+python scripts/fire/02_live_fire_detection_save_by_ip.py --ip 192.168.1.132
+python scripts/fire/03_fire_agent_go_to_fire.py --ip 192.168.1.132
 ```
 
 What each script does:
@@ -89,6 +98,226 @@ What each script does:
 - `swarm/09_setup_new_drone.py`: configures one new drone, scans for it on the router, and adds its IP to `swarm/drone_ips.txt`.
 - `swarm/10_swarm_controller.py`: starts an interactive long-running controller for all registered drones.
 - `swarm/old/`: older step-by-step swarm setup helpers kept for reference.
+- `yolo/01_detect_person_image.py`: runs YOLO person detection on one local image.
+- `yolo/02_capture_tello_images.py`: saves still images from the Tello camera for offline testing.
+- `yolo/03_live_person_detection.py`: runs live YOLO person detection on the Tello camera stream.
+- `yolo/04_live_person_detection_save_by_ip.py`: tries registered drone IPs, opens the first working video stream, draws person boxes, and saves one annotated frame per second.
+- `yolo/05_human_agent_go_to_person.py`: detects humans with YOLO, asks Chutes for one safe Tello command, and runs in dry-run unless `--enable-flight` is passed.
+- `yolo/06_chutes_frame_drill.py`: runs one saved-frame Chutes command-generation drill without connecting to the drone.
+- `fire/01_detect_fire_image.py`: downloads the SuperBitDev/fire1 model and a sample fire image, then writes an annotated fire-detection result.
+- `fire/02_live_fire_detection_save_by_ip.py`: tries registered drone IPs, opens the first working video stream, draws fire boxes, and saves one annotated frame per second. It does not fly.
+- `fire/03_fire_agent_go_to_fire.py`: detects fire, asks Chutes for one safe Tello command, records annotated video, and runs in dry-run unless `--enable-flight` is passed.
+
+## YOLO Person Detection Workflow
+
+Start with offline detection before trying real-time video. The first run downloads the YOLO model, so it needs internet access.
+
+1. Install dependencies:
+
+```bash
+pip install -r requirements.txt
+```
+
+2. Test YOLO on one local image:
+
+```bash
+python scripts/yolo/01_detect_person_image.py samples/yolo/person_crosswalk.jpg
+```
+
+This writes an annotated image to `captures/yolo_<image-name>`.
+
+3. Connect Windows to the drone Wi-Fi and capture sample images:
+
+```bash
+python scripts/yolo/02_capture_tello_images.py --count 5
+```
+
+This saves images in `captures/`.
+
+4. Run YOLO on one captured image:
+
+```bash
+python scripts/yolo/01_detect_person_image.py captures/tello_capture_XXXX_01.jpg
+```
+
+5. If people are detected correctly in still images, run live detection:
+
+```bash
+python scripts/yolo/03_live_person_detection.py
+```
+
+Press `q` in the video window to quit.
+
+6. If the drones are in station mode and registered in `scripts/swarm/drone_ips.txt`, run the IP-scanning live detector:
+
+```bash
+python scripts/yolo/04_live_person_detection_save_by_ip.py
+```
+
+This tries each registered IP, uses the first drone that responds with video, draws person boxes on screen, and saves one annotated frame per second in `captures/yolo_live/`.
+For this live-save script, the default confidence threshold is `0.80`, so the UI only shows a person as present when YOLO is at least 80% confident.
+
+The default model is `yolo11n.pt`, which is small and usually the right first test for laptop + Tello video. You can change model or confidence threshold:
+
+```bash
+python scripts/yolo/03_live_person_detection.py --model yolo11s.pt --conf 0.45 --every 5
+python scripts/yolo/04_live_person_detection_save_by_ip.py --model yolo11s.pt --conf 0.45 --every 5
+```
+
+`--every` controls how often YOLO runs. Higher values reduce CPU load and latency pressure.
+
+## YOLO Fire Detection Workflow
+
+The fire scripts use the Hugging Face model `SuperBitDev/fire1`. The first run needs internet access because it downloads the ONNX weight into `models/fire1/`. The model file is ignored by git. The ONNX post-processing follows the published miner structure: class remap, per-class thresholds/rescue, sanity-box filtering, per-class NMS, cross-class dedup, and horizontal-flip TTA.
+
+Start with the offline image test:
+
+```bash
+python scripts/fire/01_detect_fire_image.py
+```
+
+If no image path is passed, the script downloads a Wikimedia Commons fire sample into `samples/fire/`, runs the fire model, and writes the annotated result to `captures/fire/`.
+
+To test your own image:
+
+```bash
+python scripts/fire/01_detect_fire_image.py path/to/fire_image.jpg
+python scripts/fire/01_detect_fire_image.py path/to/fire_image.jpg --profile miner
+```
+
+Then test the Tello camera stream without flying:
+
+```bash
+python scripts/fire/02_live_fire_detection_save_by_ip.py --ip 192.168.1.132
+```
+
+This opens the first working drone camera, runs fire detection, draws boxes, saves one annotated frame per second to `captures/fire_live/`, and records annotated video to `captures/fire_videos/`. Press `q` to quit.
+
+The live fire script detects `fire` by default. It uses asynchronous inference so ONNX processing does not block the camera preview. It also keeps the last positive detection visible for one second by default, which reduces frame-to-frame flicker when confidence bounces around the threshold. Smoke detection is disabled by default; add `--include-smoke` only if you explicitly want smoke boxes too.
+
+Useful tuning options:
+
+```bash
+python scripts/fire/02_live_fire_detection_save_by_ip.py --ip 192.168.1.132 --profile candle --hold-seconds 1.5 --every 5
+python scripts/fire/02_live_fire_detection_save_by_ip.py --ip 192.168.1.132 --profile candle --center-zoom --center-crop 0.70 --every 5 --hold-seconds 2
+python scripts/fire/02_live_fire_detection_save_by_ip.py --ip 192.168.1.132 --profile candle --tiled --every 8 --hold-seconds 2
+python scripts/fire/02_live_fire_detection_save_by_ip.py --ip 192.168.1.132 --profile miner
+python scripts/fire/02_live_fire_detection_save_by_ip.py --ip 192.168.1.132 --include-smoke
+python scripts/fire/02_live_fire_detection_save_by_ip.py --ip 192.168.1.132 --no-record-video
+```
+
+Use `--profile miner` for the exact published threshold behavior. Use `--profile candle` for small flames, which keeps the same miner-style pipeline but lowers fire thresholds and admits smaller boxes. A candle flame can be below the miner's normal fire threshold and may occupy only a few pixels in the Tello stream; move closer, improve lighting/contrast, or show a larger flame image on a screen if you are testing safely.
+
+Use `--center-zoom --center-crop 0.70` when the fire is expected in the central 70% of the camera view. This runs inference on that center crop and maps boxes back to the full frame. It is usually faster than tiled mode because it runs one cropped inference instead of four or five passes.
+
+Use `--tiled` for small-object search when the flame is present but too small in the full frame. Tiled mode runs the detector on the full frame plus four overlapping 2x2 tiles, maps tile detections back onto the full image, then merges duplicates. It is more sensitive to small fires but costs roughly 5x more inference work, so combine it with a larger `--every` value such as `--every 8`.
+
+Safety constraint: do not fly a Tello/RoboMaster TT near real fire, heat, smoke, candles, fireplaces, or people. These scripts are for model testing and visual detection only.
+
+## Fire Approach Agent
+
+The fire approach script uses the same agent pattern as the human-follow script: detection is local, command selection is done by Chutes, and Python enforces hard safety limits. It selects the largest visible fire box, sends that context to Chutes, and validates the response. Smoke is ignored by default.
+
+Chutes is allowed to output only:
+
+- `stop`
+- `cw 1..30`
+- `ccw 1..30`
+- `forward 20..50`
+
+The Python script still owns the dangerous decisions:
+
+- it never asks Chutes to take off or land
+- it lands locally when the target looks close enough
+- it lands locally when the total forward movement reaches 400 cm
+- if no fire is detected, Chutes should command `forward 50`
+- if no fire is still detected after two forward search moves, Python lands locally
+- once fire has been detected at least once, losing it for 5 continuous seconds makes Python land locally
+- it clamps Chutes forward commands to `--forward-step-cm` and the remaining movement budget
+- it clamps Chutes yaw direction to the local `--yaw-step`
+
+Run the dry-run first:
+
+```bash
+python scripts/fire/03_fire_agent_go_to_fire.py --ip 192.168.1.132
+```
+
+The default detection settings are `--profile candle`, full-frame inference, `--detect-every 5`, and `--hold-seconds 2`. The script also reads `CHUTES_API_KEY` and optional `CHUTES_MODEL` from `.env`. Add `--center-zoom --center-crop 0.70` only if you want to use the central crop again.
+
+Only after the dry-run commands look correct, use flight mode:
+
+```bash
+python scripts/fire/03_fire_agent_go_to_fire.py --ip 192.168.1.132 --enable-flight
+```
+
+Flight mode takes off, asks Chutes for one command every few seconds, sends at most 400 cm of total forward movement by default, then lands. The landing command runs in a background worker, so the preview and annotated MP4 recording continue during landing. Press `q` to stop; the script will stop motion and attempt to land.
+
+Safer tuning options:
+
+```bash
+python scripts/fire/03_fire_agent_go_to_fire.py --ip 192.168.1.132 --max-forward-cm 200 --forward-step-cm 30
+python scripts/fire/03_fire_agent_go_to_fire.py --ip 192.168.1.132 --max-no-fire-forwards 1
+python scripts/fire/03_fire_agent_go_to_fire.py --ip 192.168.1.132 --lost-fire-land-seconds 3
+python scripts/fire/03_fire_agent_go_to_fire.py --ip 192.168.1.132 --target-coverage 3 --center-tolerance 35
+python scripts/fire/03_fire_agent_go_to_fire.py --ip 192.168.1.132 --center-zoom --center-include-full-frame
+```
+
+Do not test this against a real flame. Use a screen showing a fire image/video or another safe visual target first.
+
+## YOLO + Chutes Human Agent
+
+The human-agent script is similar to the `tello-agent` idea, but it keeps the detector local and uses YOLO only for humans. Chutes is used only to choose the next small Tello command from the latest detection JSON.
+
+Create a local `.env` file from `.env.example` and add your key:
+
+```bash
+cp .env.example .env
+```
+
+```env
+CHUTES_API_KEY=your_chutes_api_key_here
+CHUTES_MODEL=Qwen/Qwen2.5-Coder-32B-Instruct-TEE
+TELLO_TARGET_WIFI_SSID=your_router_or_hotspot_ssid
+TELLO_TARGET_WIFI_PASSWORD=your_router_or_hotspot_password
+```
+
+Run the safe dry-run first:
+
+```bash
+python scripts/yolo/05_human_agent_go_to_person.py --ip 192.168.1.132
+```
+
+Dry-run mode does not take off and does not send movement commands. It opens the camera, detects people, asks Chutes for the next command, draws the selected target, saves annotated frames to `captures/human_agent/`, and records annotated video to `captures/human_agent_videos/`.
+
+Only after the dry-run commands look sane, enable flight:
+
+```bash
+python scripts/yolo/05_human_agent_go_to_person.py --ip 192.168.1.132 --enable-flight
+```
+
+The script takes off, asks Chutes for one command every few seconds, validates that command against a small safe list, and lands on exit. By default, a human is considered close enough when the person bounding box covers at least 40% of the image; tune this with `--stop-coverage`.
+
+- `stop`
+- `cw 1..30`
+- `ccw 1..30`
+- `forward 20..50`
+- `back 20..40`
+
+The approach loop is intentionally simple: ask Chutes for one command, execute it, wait `--agent-every` seconds, then ask again. The default wait is 3 seconds. Movement commands run in a separate single-command worker so the camera preview and video recording continue while the drone is moving.
+
+Because the target is a human, the model is not allowed to land on the target. When the person fills enough of the image, the script itself rotates clockwise 180 degrees as a visible success signal, then lands. Tune the visible finish turn with `--finish-yaw`.
+
+The MP4 recording includes the same annotations shown in the UI: person bounding boxes, selected target marker, `FOLLOW_HUMAN` mode, latest Chutes command, drone label, battery, and Chutes latency. It records at 20 FPS by default; tune this with `--record-fps`. The recorder uses real-time pacing so occasional slow processing frames do not make the saved video play back too fast. When Windows Python is running from a `\\wsl.localhost\...` repo path, the script records to a local temp file first and copies the finished video back to `captures/human_agent_videos/`; this avoids OpenCV/FFmpeg frame-write warnings on WSL network paths. Disable video recording with `--no-record-video` if needed.
+
+Press `q` in the video window to stop the run. In flight mode, `q` cancels pending agent work, sends `stop`, attempts to land, stops the video stream, saves the MP4, and closes the window. `Ctrl+C` follows the same safe-landing path.
+
+To test Chutes on one saved frame without connecting to the drone:
+
+```bash
+python scripts/yolo/06_chutes_frame_drill.py --stop-coverage 40
+```
+
+With the sample close-person frame, `40` means the person is close enough, so the expected result is the target-reached path instead of another `forward 50`.
 
 ## Two-Drone Wi-Fi Workflow
 
@@ -96,9 +325,10 @@ Use this only with Tello EDU / RoboMaster TT / Tello Talent drones that support 
 
 1. Power on only the new drone.
 2. Connect Windows to that drone's `TELLO-*` Wi-Fi.
-3. Run `python scripts/swarm/09_setup_new_drone.py`.
-4. When the drone reboots, make sure Windows reconnects to `DIGIFIBRA-HU4H`.
-5. The script scans the router network and appends any new drone IP to `scripts/swarm/drone_ips.txt`.
+3. Put your router/hotspot credentials in `.env`, or pass them with `--ssid` and `--password`.
+4. Run `python scripts/swarm/09_setup_new_drone.py`.
+5. When the drone reboots, make sure Windows reconnects to your router/hotspot Wi-Fi.
+6. The script scans the router network and appends any new drone IP to `scripts/swarm/drone_ips.txt`.
 
 After drones are registered in `drone_ips.txt`, this command runs the motor test for every registered drone:
 

@@ -19,3 +19,8 @@ venv-win/
 Langostino/
 .deploy_keys/
 .repo-git/
+captures/
+models/
+samples/fire/*.jpg
+*.pt
+runs/
