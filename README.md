@@ -3,8 +3,8 @@
 # Swarm Tello Fire Detection PoC
 
 <p align="center">
-  <b>Fire detection from a DJI RoboMaster TT / Tello camera, with an optional Chutes-powered flight agent.</b><br/>
-  A small proof of concept for turning a drone camera feed into fire awareness, annotated evidence, and cautious autonomous movement commands.
+  <b>Fire detection from a DJI RoboMaster TT / Tello camera using Score's top Detect-fire skill.</b><br/>
+  A proof of concept that turns a drone camera feed into fire awareness, annotated evidence, and cautious Chutes-powered flight commands.
 </p>
 
 <p align="center">
@@ -23,8 +23,8 @@ This repository is a practical fire-detection proof of concept built around the 
 - detect fire locally with an ONNX fire model
 - draw bounding boxes and status overlays in real time
 - save annotated frames and videos for review
-- optionally ask Chutes for a single safe movement command
-- optionally fly toward the detected fire target under strict local safety limits
+- ask Chutes for a single safe movement command
+- fly toward the detected fire target under strict local safety limits when flight mode is explicitly enabled
 
 The Tello scripts are still included, but they are not the main point of the project anymore. They are support tools for validating connectivity, camera streaming, station-mode networking, and safe bench tests before running the fire PoC.
 
