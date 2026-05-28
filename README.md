@@ -72,6 +72,7 @@ That means you can inspect each step independently: model output, Chutes prompt 
 - `opencv-python` for live camera display, annotation, and video recording
 - `onnxruntime` for the fire model inference path
 - `ultralytics` for YOLO person-detection experiments
+- `torch` and `transformers` for monocular depth experiments
 - Chutes LLM API for command selection in the agent scripts
 
 ## Fire Model
@@ -213,6 +214,57 @@ python scripts/swarm/09_setup_new_drone.py
 ```
 
 The script sends the Tello `ap` command, waits for reboot, scans the router network, and appends the new IP to [scripts/swarm/drone_ips.txt](scripts/swarm/drone_ips.txt).
+
+## Depth Capture Workflow
+
+The depth scripts are for studying whether real Tello camera frames can be converted into simulation-like depth observations.
+
+```text
+Tello RGB camera
+  -> monocular depth model
+  -> depth map
+  -> 128x128 normalized depth array
+  -> visual depth images and CSV statistics
+```
+
+This is estimated monocular depth. It is useful for comparing shape, obstacle layout, latency, and normalization behavior against simulation. The depth workflow now uses one script with three modes: `image`, `folder`, and `live`.
+
+Run a local image test:
+
+```bash
+python scripts/depth/01_depth_capture.py image path/to/image.jpg
+```
+
+Run the same model over previously captured Tello RGB images:
+
+```bash
+python scripts/depth/01_depth_capture.py folder captures/depth_live/<run-id> --limit 10
+```
+
+Run live Tello depth capture:
+
+```bash
+python scripts/depth/01_depth_capture.py live --ip 192.168.1.132
+```
+
+Depth inference defaults to CPU for predictable setup. If you have a working CUDA GPU, pass `--device cuda` before the mode name.
+
+The default model is Depth Anything V2 Metric Indoor Small:
+
+```text
+depth-anything/Depth-Anything-V2-Metric-Indoor-Small-hf
+```
+
+This model estimates depth in meters and is then normalized to the same depth convention used by the subnet:
+
+```text
+0.0 = 0.5m or closer
+1.0 = 20m or farther
+```
+
+This is the preferred lightweight real-camera depth experiment because the indoor metric model is small and its 20m range matches the subnet depth cap.
+
+Each saved sample includes the source RGB image, colorized depth image, normalized depth PNG, `128x128` `.npy` array, raw meter-depth `.npy` array, side-by-side image, and a `depth_stats.csv` row.
 
 ## Fire PoC Workflow
 
