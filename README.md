@@ -15,6 +15,24 @@
   <img alt="Tello" src="https://img.shields.io/badge/DJI%20Tello-SDK%20Control-222222?style=flat-square" />
 </p>
 
+## See It In Action
+
+<p align="center">
+  <b>PoC: Fire Tracker running on a real Tello drone</b>
+</p>
+
+<p align="center">
+  <a href="https://youtu.be/isjBdhPj0QY" target="_blank" rel="noopener noreferrer">
+    <img src="https://img.youtube.com/vi/isjBdhPj0QY/maxresdefault.jpg" alt="PoC Fire Tracker drone flight - click to watch" width="720" loading="lazy" />
+  </a>
+</p>
+
+<p align="center">
+  <a href="https://youtu.be/isjBdhPj0QY" target="_blank" rel="noopener noreferrer">
+    <img src="https://img.shields.io/badge/Watch%20on-YouTube-FF0000?style=for-the-badge&logo=youtube&logoColor=white" alt="Watch on YouTube" />
+  </a>
+</p>
+
 ## What This Is
 
 This repository is a practical fire-detection proof of concept built around the RoboMaster TT / Tello Talent drone. The main experiment is:
