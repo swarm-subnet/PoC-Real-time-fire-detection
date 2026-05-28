@@ -58,27 +58,38 @@ That means you can inspect each step independently: model output, Chutes prompt 
 
 ## Fire Model
 
-The fire detector uses the Score / Manako-style fire model published on Hugging Face as:
+The fire detector uses the current top Score / Manako fire miner model:
+
+```text
+manak0/Detect-fire
+```
+
+Model page:
+
+```text
+https://console.scorevision.io/elements/manak0%2FDetect-fire
+```
+
+Thanks to Manako and Score for making this model available. This PoC uses it as the perception layer: the model looks at each camera frame and returns boxes around visual fire-like regions so the rest of the system can decide what to display, record, or do next.
+
+The code downloads and caches the compatible ONNX weights from:
 
 ```text
 SuperBitDev/fire1
 ```
 
-The code downloads and caches `weights.onnx` into:
+Cached model path:
 
 ```text
 models/fire1/weights.onnx
 ```
 
-The ONNX pipeline in [src/fire_utils.py](src/fire_utils.py) follows the published miner-style post-processing:
+In simple terms, [src/fire_utils.py](src/fire_utils.py) does four things:
 
-- model class remap for `fire`, `smoke`, and `fire extinguisher`
-- per-class confidence thresholds
-- optional rescue logic for borderline detections
-- box sanity filtering
-- per-class non-maximum suppression
-- cross-class duplicate removal
-- horizontal flip test-time augmentation
+- prepares the drone image in the format the model expects
+- runs the fire model locally on the laptop
+- filters out weak or obviously bad boxes
+- returns clean `fire` detections that can be drawn on the video or sent to the agent
 
 By default, the live scripts focus on `fire` only. Smoke is disabled unless you explicitly pass `--include-smoke`.
 
@@ -399,9 +410,5 @@ The swarm motor script binds local UDP port `8889`, which avoids the station-mod
 - The script prints Chutes latency.
 - Keep `--decision-every` at a few seconds so motion, camera, and recording stay stable.
 - The local safety layer still validates every response.
-
-## Related Project
-
-This README style and project framing are inspired by [Langostino](https://github.com/swarm-subnet/Langostino), Swarm's larger open autonomous drone reference platform. This repository is intentionally smaller: it focuses on a fast, inspectable fire-detection PoC using a readily available RoboMaster TT / Tello platform.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
