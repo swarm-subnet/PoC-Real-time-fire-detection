@@ -10,12 +10,6 @@ Fire detection from a DJI RoboMaster TT / Tello camera using Score's top Detect-
 
 Live camera -> fire model -> annotated evidence -> Chutes decision -> validated drone command.
 
-<img alt="Python" src="https://img.shields.io/badge/Python-3.10+-3776AB?style=flat-square&logo=python&logoColor=white" />
-<img alt="OpenCV" src="https://img.shields.io/badge/OpenCV-Live%20Video-5C3EE8?style=flat-square&logo=opencv&logoColor=white" />
-<img alt="ONNX Runtime" src="https://img.shields.io/badge/ONNX%20Runtime-Fire%20Model-111111?style=flat-square" />
-<img alt="Chutes" src="https://img.shields.io/badge/Chutes-LLM%20Agent-111111?style=flat-square" />
-<img alt="Tello" src="https://img.shields.io/badge/DJI%20Tello-Camera%20%2B%20SDK-222222?style=flat-square" />
-
 </div>
 
 ## Demo
@@ -54,6 +48,8 @@ Tello camera
 ```
 
 The Tello setup scripts are support tools. They help validate connectivity, camera streaming, station-mode networking, and bench tests before running the fire PoC.
+
+Want to build your own autonomous drone? Check out [Langostino](https://github.com/swarm-subnet/Langostino), Swarm's open-source autonomous drone platform.
 
 ## Fire Model
 
