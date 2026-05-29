@@ -32,10 +32,12 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from depth_utils import (  # noqa: E402
+    DEFAULT_CPU_THREADS,
     DEFAULT_METRIC_DEPTH_MODEL,
     DepthPrediction,
     MetricDepthEstimator,
     draw_depth_status,
+    make_depth_display,
     make_depth_side_by_side,
     save_depth_sample,
 )
@@ -76,6 +78,17 @@ def parse_args() -> argparse.Namespace:
         default="auto",
         choices=("auto", "float32", "float16", "bfloat16"),
         help="Model dtype. Default: auto.",
+    )
+    parser.add_argument(
+        "--cpu-threads",
+        type=int,
+        default=DEFAULT_CPU_THREADS,
+        help=f"PyTorch CPU threads to use. Default: {DEFAULT_CPU_THREADS}. Use 0 to leave PyTorch default.",
+    )
+    parser.add_argument(
+        "--quantize",
+        action="store_true",
+        help="Use optional dynamic int8 quantization on CPU. Faster in tests, but depth values can shift slightly.",
     )
 
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -119,14 +132,30 @@ def parse_args() -> argparse.Namespace:
     live_parser.add_argument(
         "--every",
         type=int,
-        default=10,
-        help="Submit depth inference every N video frames when the model is idle. Default: 10.",
+        default=1,
+        help="Submit depth inference every N video frames when the model is idle. Default: 1.",
+    )
+    live_parser.add_argument(
+        "--view",
+        choices=("side-by-side", "depth"),
+        default="depth",
+        help="Live window/recording layout. Default: depth.",
+    )
+    live_parser.add_argument(
+        "--smooth",
+        action="store_true",
+        help="Compatibility flag for the current defaults: infer every frame, save every 5s, and show depth only.",
+    )
+    live_parser.add_argument(
+        "--hide-overlay",
+        action="store_true",
+        help="Hide status text on the live preview and recording.",
     )
     live_parser.add_argument(
         "--save-every-seconds",
         type=float,
-        default=1.0,
-        help="Save at most one processed sample every N seconds. Default: 1.",
+        default=5.0,
+        help="Save at most one processed sample every N seconds. Default: 5.",
     )
     live_parser.add_argument(
         "--save-dir",
@@ -142,7 +171,7 @@ def parse_args() -> argparse.Namespace:
         "--record-fps",
         type=float,
         default=DEFAULT_RECORD_FPS,
-        help="FPS to write into the side-by-side video file. Default: 20.",
+        help="FPS to write into the depth video file. Default: 20.",
     )
     live_parser.add_argument("--no-record-video", action="store_true", help="Disable side-by-side video recording.")
     live_parser.add_argument(
@@ -161,7 +190,18 @@ def resolve_path(path_text: str | Path) -> Path:
 
 def load_estimator(args: argparse.Namespace) -> MetricDepthEstimator:
     print(f"Loading metric depth model: {args.model}")
-    return MetricDepthEstimator(model_name=args.model, device=args.device, dtype=args.dtype)
+    estimator = MetricDepthEstimator(
+        model_name=args.model,
+        device=args.device,
+        dtype=args.dtype,
+        cpu_threads=args.cpu_threads,
+        quantize=args.quantize,
+    )
+    if estimator.cpu_threads:
+        print(f"Using PyTorch CPU threads: {estimator.cpu_threads}")
+    if estimator.quantized:
+        print("Using dynamic int8 quantization for CPU inference.")
+    return estimator
 
 
 def run_image(args: argparse.Namespace) -> None:
@@ -234,6 +274,9 @@ def make_display_frame(
     drone_ip: str,
     battery: int | None,
     saved_count: int,
+    view: str,
+    with_overlay: bool,
+    depth_frame_count: int,
 ):
     if latest_prediction is None or latest_depth_frame_bgr is None:
         blank_depth = latest_frame_bgr.copy()
@@ -247,16 +290,35 @@ def make_display_frame(
             2,
             cv2.LINE_AA,
         )
-        display = cv2.hconcat([latest_frame_bgr, blank_depth])
-        draw_depth_status(display, drone_ip, battery, None, saved_count)
+        display = blank_depth if view == "depth" else cv2.hconcat([latest_frame_bgr, blank_depth])
+        if with_overlay:
+            draw_depth_status(display, drone_ip, battery, None, saved_count)
         return display
 
+    if view == "depth":
+        frame_size = (latest_depth_frame_bgr.shape[1], latest_depth_frame_bgr.shape[0])
+        return make_depth_display(
+            latest_prediction,
+            frame_size,
+            with_overlay=with_overlay,
+            drone_ip=drone_ip,
+            battery=battery,
+            saved_count=saved_count,
+            depth_frame_count=depth_frame_count,
+        )
+
     display = make_depth_side_by_side(latest_depth_frame_bgr, latest_prediction)
-    draw_depth_status(display, drone_ip, battery, latest_prediction, saved_count)
+    if with_overlay:
+        draw_depth_status(display, drone_ip, battery, latest_prediction, saved_count)
     return display
 
 
 def run_live(args: argparse.Namespace) -> None:
+    if args.smooth:
+        args.every = 1
+        args.save_every_seconds = max(args.save_every_seconds, 5.0)
+        args.view = "depth"
+
     candidate_ips = build_candidate_ips(args)
     save_root = resolve_path(args.save_dir)
     video_dir = resolve_path(args.video_dir)
@@ -275,6 +337,7 @@ def run_live(args: argparse.Namespace) -> None:
     latest_prediction: DepthPrediction | None = None
     latest_depth_frame_bgr = None
     latest_reported_ms: int | None = None
+    depth_frame_count = 0
 
     try:
         estimator = load_estimator(args)
@@ -286,11 +349,12 @@ def run_live(args: argparse.Namespace) -> None:
 
         print("This script only observes. It does not take off or move the drone.")
         print("Raw metric output is in meters; saved normalized depth uses subnet 0.5m..20m convention.")
+        print(f"Live view: {args.view}. Submit depth inference every {max(1, args.every)} frame(s).")
         print(f"Saving metric depth run to: {run_dir}")
         if args.no_record_video:
-            print("Side-by-side video recording is disabled.")
+            print("Depth video recording is disabled.")
         else:
-            print(f"Saving side-by-side video to: {video_dir}")
+            print(f"Saving depth video to: {video_dir}")
         print("Video window open. Press 'q' to quit.")
 
         while True:
@@ -299,12 +363,14 @@ def run_live(args: argparse.Namespace) -> None:
                     result = pending_future.result()
                     latest_prediction = result.prediction
                     latest_depth_frame_bgr = result.frame_bgr
+                    depth_frame_count += 1
 
                     rounded_ms = int(round(latest_prediction.inference_ms))
-                    if rounded_ms != latest_reported_ms:
+                    if rounded_ms != latest_reported_ms or args.view == "depth":
                         print(
                             f"[{time.strftime('%H:%M:%S')}] Metric depth inference: "
-                            f"{latest_prediction.inference_ms:.0f} ms"
+                            f"{latest_prediction.inference_ms:.0f} ms "
+                            f"(depth frame #{depth_frame_count})"
                         )
                         latest_reported_ms = rounded_ms
 
@@ -337,6 +403,9 @@ def run_live(args: argparse.Namespace) -> None:
                 drone_ip,
                 battery,
                 saved_count,
+                args.view,
+                not args.hide_overlay,
+                depth_frame_count,
             )
 
             if not args.no_record_video:

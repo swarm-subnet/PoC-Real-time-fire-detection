@@ -8,6 +8,7 @@ subnet contract: 0.0 = 0.5m or closer, 1.0 = 20m or farther.
 from __future__ import annotations
 
 import csv
+import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -18,6 +19,7 @@ import numpy as np
 
 
 DEFAULT_METRIC_DEPTH_MODEL = "depth-anything/Depth-Anything-V2-Metric-Indoor-Small-hf"
+DEFAULT_CPU_THREADS = min(6, os.cpu_count() or 1)
 DEPTH_128_SIZE = (128, 128)
 SUBNET_DEPTH_MIN_M = 0.5
 SUBNET_DEPTH_MAX_M = 20.0
@@ -56,6 +58,8 @@ class MetricDepthEstimator:
         model_name: str = DEFAULT_METRIC_DEPTH_MODEL,
         device: str = "cpu",
         dtype: str = "auto",
+        cpu_threads: int = DEFAULT_CPU_THREADS,
+        quantize: bool = False,
     ) -> None:
         try:
             import torch
@@ -70,6 +74,8 @@ class MetricDepthEstimator:
         self.device = resolve_torch_device(torch, device)
         self.dtype = resolve_torch_dtype(torch, dtype, self.device)
         self.model_name = model_name
+        self.cpu_threads = configure_torch_cpu_threads(torch, cpu_threads, self.device)
+        self.quantized = False
 
         self.processor = AutoImageProcessor.from_pretrained(model_name)
         load_kwargs: dict[str, Any] = {}
@@ -77,6 +83,12 @@ class MetricDepthEstimator:
             load_kwargs["torch_dtype"] = self.dtype
 
         self.model = AutoModelForDepthEstimation.from_pretrained(model_name, **load_kwargs)
+        if quantize:
+            if self.device.type != "cpu":
+                raise ValueError("--quantize is only supported for CPU inference.")
+            self.model = torch.ao.quantization.quantize_dynamic(self.model, {torch.nn.Linear}, dtype=torch.qint8)
+            self.quantized = True
+
         self.model.to(self.device)
         self.model.eval()
 
@@ -100,6 +112,8 @@ class MetricDepthEstimator:
             mode="bicubic",
             align_corners=False,
         )
+        if self.device.type == "cuda":
+            self.torch.cuda.synchronize(self.device)
         inference_ms = (time.perf_counter() - started) * 1000.0
 
         depth_meters = tensor_to_numpy(prediction.squeeze()).astype(np.float32)
@@ -119,6 +133,8 @@ class MetricDepthEstimator:
                 "display_mode": "metric indoor depth 0.5m..20m",
                 "metric_min_m": SUBNET_DEPTH_MIN_M,
                 "metric_max_m": SUBNET_DEPTH_MAX_M,
+                "cpu_threads": float(self.cpu_threads),
+                "quantized": float(self.quantized),
             },
         )
 
@@ -135,10 +151,13 @@ def resolve_torch_device(torch_module, device: str):
 
 
 def resolve_torch_dtype(torch_module, dtype: str, device) -> Any | None:
-    """Pick a safe inference dtype. CPU stays float32 by default."""
+    """Pick a safe inference dtype.
+
+    On the tested GTX 1650, CUDA float32 is substantially faster than float16
+    for this model, so auto keeps the model in float32 unless explicitly
+    overridden.
+    """
     if dtype == "auto":
-        if str(device).startswith("cuda"):
-            return torch_module.float16
         return None
     if dtype == "float16":
         return torch_module.float16
@@ -147,6 +166,23 @@ def resolve_torch_dtype(torch_module, dtype: str, device) -> Any | None:
     if dtype == "float32":
         return None
     raise ValueError(f"Unsupported dtype: {dtype}")
+
+
+def configure_torch_cpu_threads(torch_module, cpu_threads: int, device) -> int:
+    """Set a conservative CPU thread count before inference starts."""
+    if device.type != "cpu":
+        return 0
+
+    if cpu_threads <= 0:
+        return torch_module.get_num_threads()
+
+    threads = max(1, int(cpu_threads))
+    torch_module.set_num_threads(threads)
+    try:
+        torch_module.set_num_interop_threads(1)
+    except RuntimeError:
+        pass
+    return threads
 
 
 def tensor_to_numpy(value) -> np.ndarray:
@@ -237,16 +273,15 @@ def draw_depth_status(
     saved_count: int,
 ) -> None:
     """Draw compact status text at the bottom of a depth preview frame."""
-    overlay_height = 92
+    overlay_height = 64
     y0 = max(0, frame_bgr.shape[0] - overlay_height)
     cv2.rectangle(frame_bgr, (0, y0), (frame_bgr.shape[1], frame_bgr.shape[0]), (0, 0, 0), -1)
 
     inference_text = "waiting" if prediction is None else f"{prediction.inference_ms:.0f} ms"
-    model_text = "loading" if prediction is None else prediction.model_name.rsplit("/", maxsplit=1)[-1]
 
     cv2.putText(
         frame_bgr,
-        "MODE: DEPTH_CAPTURE  left=RGB  right=metric indoor depth",
+        "MODE: DEPTH_CAPTURE",
         (12, y0 + 28),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.7,
@@ -264,16 +299,28 @@ def draw_depth_status(
         1,
         cv2.LINE_AA,
     )
-    cv2.putText(
-        frame_bgr,
-        f"Saved: {saved_count}  Model: {model_text}  Press q to quit",
-        (12, y0 + 80),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.6,
-        (255, 255, 255),
-        1,
-        cv2.LINE_AA,
-    )
+
+
+def make_depth_display(
+    prediction: DepthPrediction,
+    frame_size: tuple[int, int],
+    with_overlay: bool,
+    drone_ip: str,
+    battery: int | None,
+    saved_count: int,
+    depth_frame_count: int = 0,
+) -> np.ndarray:
+    """Return a display frame containing only the colorized depth map."""
+    width, height = frame_size
+    display = prediction.color_bgr
+    if display.shape[:2] != (height, width):
+        display = cv2.resize(display, (width, height), interpolation=cv2.INTER_LINEAR)
+    else:
+        display = display.copy()
+
+    if with_overlay:
+        draw_depth_status(display, drone_ip, battery, prediction, saved_count)
+    return display
 
 
 def save_depth_sample(

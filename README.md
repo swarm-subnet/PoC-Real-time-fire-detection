@@ -174,6 +174,21 @@ pip install -r requirements.txt
 
 Native Windows Python is recommended for video display and Tello UDP streaming. WSL can work for some control-only tests, but Windows networking is usually simpler for camera work.
 
+For Windows GPU depth inference with an NVIDIA driver that reports CUDA `12.9`, create `venv-win` with:
+
+```powershell
+python -m venv venv-win
+.\venv-win\Scripts\Activate.ps1
+python -m pip install --upgrade pip setuptools wheel certifi
+python -m pip install -r requirements-windows-cuda.txt --trusted-host download.pytorch.org --no-cache-dir --timeout 120 --retries 10
+```
+
+Verify CUDA:
+
+```powershell
+python -c "import torch; print(torch.__version__); print(torch.version.cuda); print(torch.cuda.is_available()); print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'no cuda')"
+```
+
 ### 2. Configure Chutes
 
 Create a local `.env` file:
@@ -247,7 +262,18 @@ Run live Tello depth capture:
 python scripts/depth/01_depth_capture.py live --ip 192.168.1.132
 ```
 
-Depth inference defaults to CPU for predictable setup. If you have a working CUDA GPU, pass `--device cuda` before the mode name.
+Depth inference defaults to CPU for predictable setup. The model is loaded once when the script starts and reused for every image/frame in that run. CPU inference uses a conservative thread count by default; tune it with `--cpu-threads` before the mode name. If you have a working CUDA GPU, pass `--device cuda`.
+
+```bash
+python scripts/depth/01_depth_capture.py --cpu-threads 6 live --ip 192.168.1.132
+python scripts/depth/01_depth_capture.py --device cuda live --ip 192.168.1.132
+```
+
+For the tested Windows CUDA setup, the default live mode records depth-only video, runs inference every frame, and uses float32 because it is faster on the GTX 1650:
+
+```powershell
+python scripts\depth\01_depth_capture.py --device cuda live --ip 192.168.1.132
+```
 
 The default model is Depth Anything V2 Metric Indoor Small:
 
