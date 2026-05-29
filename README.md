@@ -2,6 +2,8 @@
 
 <div align="center">
 
+<img src="assets/Swarm_2.png" alt="Swarm" width="60%" />
+
 # PoC: Real-Time Fire Detection
 
 Fire detection from a DJI RoboMaster TT / Tello camera using Score's top Detect-fire skill.
