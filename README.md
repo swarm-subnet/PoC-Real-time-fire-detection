@@ -10,6 +10,8 @@ Fire detection from a DJI RoboMaster TT / Tello camera using Score's top Detect-
 
 Live camera -> fire model -> annotated evidence -> Chutes decision -> validated drone command.
 
+If this project is useful or interesting, please star the repo.
+
 </div>
 
 ## Demo
