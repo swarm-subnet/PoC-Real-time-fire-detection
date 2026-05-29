@@ -1,7 +1,7 @@
 """Live fire detection from the first reachable Tello camera.
 
-This script does not fly. It only opens the camera stream, runs the
-SuperBitDev/fire1 ONNX model, draws hazard boxes, and saves annotated frames.
+This script does not fly. It opens the camera stream, runs the
+SuperBitDev/fire1 ONNX model, draws fire boxes, and saves annotated evidence.
 """
 
 from __future__ import annotations
@@ -20,7 +20,6 @@ SRC_DIR = ROOT_DIR / "src"
 DEFAULT_IP_FILE = ROOT_DIR / "scripts" / "swarm" / "drone_ips.txt"
 DEFAULT_SAVE_DIR = ROOT_DIR / "captures" / "fire_live"
 DEFAULT_VIDEO_DIR = ROOT_DIR / "captures" / "fire_videos"
-DEFAULT_CONFIDENCE_THRESHOLD = 0.25
 DEFAULT_RECORD_FPS = 20.0
 DEFAULT_DETECTION_PROFILE = "candle"
 
@@ -41,10 +40,10 @@ from tello_stream import (
     resolve_path as resolve_root_path,
     stop_streaming_tello,
 )
-from yolo_utils import detect_labels_in_image, draw_detections, load_yolo_model
+from detection_utils import draw_detections
 
 
-WINDOW_NAME = "Tello YOLO Live Fire Detection"
+WINDOW_NAME = "Tello Live Fire Detection"
 
 
 def parse_args() -> argparse.Namespace:
@@ -70,7 +69,7 @@ def parse_args() -> argparse.Namespace:
         "--model",
         type=Path,
         default=None,
-        help="Local YOLO .pt/.onnx path. If omitted, downloads weights.onnx from SuperBitDev/fire1.",
+        help="Local .onnx model path. If omitted, downloads weights.onnx from SuperBitDev/fire1.",
     )
     parser.add_argument("--repo-id", default=FIRE_MODEL_REPO_ID, help="Hugging Face model repo ID.")
     parser.add_argument(
@@ -80,13 +79,7 @@ def parse_args() -> argparse.Namespace:
         help="ONNX post-processing profile. 'miner' matches the published miner thresholds; 'candle' is more sensitive.",
     )
     parser.add_argument("--include-smoke", action="store_true", help="Also include smoke detections.")
-    parser.add_argument(
-        "--conf",
-        type=float,
-        default=DEFAULT_CONFIDENCE_THRESHOLD,
-        help="Confidence threshold for .pt fallback models. ONNX uses --profile thresholds.",
-    )
-    parser.add_argument("--every", type=int, default=3, help="Run YOLO every N frames to reduce CPU load.")
+    parser.add_argument("--every", type=int, default=3, help="Run fire inference every N frames to reduce CPU load.")
     parser.add_argument(
         "--tiled",
         action="store_true",
@@ -168,10 +161,9 @@ def build_candidate_ips(args: argparse.Namespace) -> list[str]:
     )
 
 
-def detect_fire_with_fallback(
-    model,
+def detect_fire(
+    model: FireOnnxDetector,
     frame_bgr,
-    confidence_threshold: float,
     include_smoke: bool,
     tiled: bool,
     tile_overlap: float,
@@ -180,38 +172,24 @@ def detect_fire_with_fallback(
     center_crop: float,
     center_include_full_frame: bool,
 ):
-    if isinstance(model, FireOnnxDetector):
-        if center_zoom:
-            detections = predict_center_zoom(
-                model,
-                frame_bgr,
-                crop_fraction=center_crop,
-                include_full_frame=center_include_full_frame,
-            )
-        elif tiled:
-            detections = predict_tiled(
-                model,
-                frame_bgr,
-                include_full_frame=not tile_only,
-                overlap=tile_overlap,
-            )
-        else:
-            detections = model.predict(frame_bgr)
-        return keep_fire_detections(
-            detections,
-            include_smoke=include_smoke,
+    if center_zoom:
+        detections = predict_center_zoom(
+            model,
+            frame_bgr,
+            crop_fraction=center_crop,
+            include_full_frame=center_include_full_frame,
         )
+    elif tiled:
+        detections = predict_tiled(
+            model,
+            frame_bgr,
+            include_full_frame=not tile_only,
+            overlap=tile_overlap,
+        )
+    else:
+        detections = model.predict(frame_bgr)
 
-    target_substrings = {"fire", "flame", "smoke"} if include_smoke else {"fire", "flame"}
-    detections = detect_labels_in_image(
-        model,
-        frame_bgr,
-        target_substrings=target_substrings,
-        confidence_threshold=confidence_threshold,
-    )
-    if not detections and len(model.names) == 1:
-        detections = detect_labels_in_image(model, frame_bgr, confidence_threshold=confidence_threshold)
-    return detections
+    return keep_fire_detections(detections, include_smoke=include_smoke)
 
 
 def draw_status_overlay(
@@ -266,7 +244,6 @@ def draw_status_overlay(
 def run_fire_detection(
     model,
     frame_bgr,
-    confidence_threshold: float,
     include_smoke: bool,
     tiled: bool,
     tile_overlap: float,
@@ -276,10 +253,9 @@ def run_fire_detection(
     center_include_full_frame: bool,
 ):
     inference_start = time.perf_counter()
-    detections = detect_fire_with_fallback(
+    detections = detect_fire(
         model,
         frame_bgr,
-        confidence_threshold=confidence_threshold,
         include_smoke=include_smoke,
         tiled=tiled,
         tile_overlap=tile_overlap,
@@ -306,6 +282,8 @@ def main() -> None:
     save_dir = resolve_path(args.save_dir)
     video_dir = resolve_path(args.video_dir)
     model_path = resolve_path(args.model) if args.model is not None else get_fire_model_path(args.repo_id)
+    if model_path.suffix.lower() != ".onnx":
+        raise ValueError("The fire PoC expects an ONNX model. Use weights.onnx from SuperBitDev/fire1.")
 
     tello = None
     frame_read = None
@@ -323,13 +301,9 @@ def main() -> None:
 
     try:
         print(f"Loading fire model: {model_path}")
-        if model_path.suffix.lower() == ".onnx":
-            model = FireOnnxDetector(model_path, profile=args.profile)
-            print(f"Model labels: {model.class_names}")
-            print(f"Detection profile: {model.profile}")
-        else:
-            model = load_yolo_model(str(model_path))
-            print(f"Model labels: {model.names}")
+        model = FireOnnxDetector(model_path, profile=args.profile)
+        print(f"Model labels: {model.class_names}")
+        print(f"Detection profile: {model.profile}")
 
         tello, frame_read, drone_ip, battery = connect_first_streaming_drone(
             candidate_ips,
@@ -337,7 +311,7 @@ def main() -> None:
             usage_label="for live fire detection",
         )
 
-        print("Safety note: this script only observes. Do not fly near real fire, heat, smoke, or people.")
+        print("Observation-only mode. This script records the controlled fire-detection target; it does not fly.")
         if args.center_zoom:
             print(
                 "Center-zoom detection enabled: "
@@ -387,7 +361,6 @@ def main() -> None:
                     run_fire_detection,
                     model,
                     frame_bgr.copy(),
-                    args.conf,
                     args.include_smoke,
                     args.tiled,
                     args.tile_overlap,

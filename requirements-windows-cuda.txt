@@ -1,4 +1,4 @@
-# Windows/NVIDIA GPU environment for Python 3.12.
+# Windows/NVIDIA GPU environment for Python 3.12 depth experiments.
 #
 # Use this for venv-win on the laptop with NVIDIA driver/CUDA 12.9:
 #   python -m pip install -r requirements-windows-cuda.txt
@@ -7,10 +7,8 @@
 # the PyTorch CUDA 12.9 wheel index and pins the matching torch/torchvision pair.
 --extra-index-url https://download.pytorch.org/whl/cu129
 
-djitellopy
-opencv-python
-onnxruntime
-ultralytics
+-r requirements.txt
+
 transformers>=4.52.0
 pillow
 torch==2.8.0+cu129

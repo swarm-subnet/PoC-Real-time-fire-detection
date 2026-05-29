@@ -16,7 +16,7 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from fire_utils import FIRE_MODEL_REPO_ID, FireOnnxDetector, download_fire_sample, get_fire_model_path, keep_fire_detections
-from yolo_utils import detect_labels_in_image, load_yolo_model, save_annotated_image
+from detection_utils import save_annotated_image
 
 
 def parse_args() -> argparse.Namespace:
@@ -32,15 +32,9 @@ def parse_args() -> argparse.Namespace:
         "--model",
         type=Path,
         default=None,
-        help="Local YOLO .pt/.onnx path. If omitted, downloads weights.onnx from SuperBitDev/fire1.",
+        help="Local .onnx model path. If omitted, downloads weights.onnx from SuperBitDev/fire1.",
     )
     parser.add_argument("--repo-id", default=FIRE_MODEL_REPO_ID, help="Hugging Face model repo ID.")
-    parser.add_argument(
-        "--conf",
-        type=float,
-        default=0.35,
-        help="Confidence threshold for .pt fallback models. ONNX uses --profile thresholds.",
-    )
     parser.add_argument(
         "--profile",
         choices=("candle", "miner"),
@@ -73,26 +67,15 @@ def main() -> None:
         raise FileNotFoundError(f"Could not read image: {image_path}")
 
     print(f"Loading fire model: {model_path}")
-    if model_path.suffix.lower() == ".onnx":
-        model = FireOnnxDetector(model_path, profile=args.profile)
-        print(f"Model labels: {model.class_names}")
-        detections = keep_fire_detections(
-            model.predict(image_bgr),
-            include_smoke=args.include_smoke,
-        )
-    else:
-        model = load_yolo_model(str(model_path))
-        print(f"Model labels: {model.names}")
-        target_substrings = {"fire", "flame", "smoke"} if args.include_smoke else {"fire", "flame"}
-        detections = detect_labels_in_image(
-            model,
-            image_bgr,
-            target_substrings=target_substrings,
-            confidence_threshold=args.conf,
-        )
-        if not detections and len(model.names) == 1:
-            print("No 'fire'/'flame' label matched, but this model has one class. Treating that class as fire.")
-            detections = detect_labels_in_image(model, image_bgr, confidence_threshold=args.conf)
+    if model_path.suffix.lower() != ".onnx":
+        raise ValueError("The fire PoC expects an ONNX model. Use weights.onnx from SuperBitDev/fire1.")
+
+    model = FireOnnxDetector(model_path, profile=args.profile)
+    print(f"Model labels: {model.class_names}")
+    detections = keep_fire_detections(
+        model.predict(image_bgr),
+        include_smoke=args.include_smoke,
+    )
 
     output_path = args.output or ROOT_DIR / "captures" / "fire" / f"fire_{image_path.name}"
     save_annotated_image(image_path, output_path, detections, image_bgr)

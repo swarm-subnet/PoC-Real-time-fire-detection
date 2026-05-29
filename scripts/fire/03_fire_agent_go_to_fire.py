@@ -1,11 +1,8 @@
 """Fire-following Tello agent with conservative flight limits.
 
-Default behavior is a dry-run: it opens the camera, detects fire, draws
+Default behavior is a dry run: it opens the camera, detects fire, draws
 the chosen target, records annotated video, and prints the command it would run.
 Pass --enable-flight only after the dry-run behavior looks correct.
-
-Safety: do not fly near real fire, heat, smoke, candles, people, or fragile
-objects. For controlled tests, prefer a fire image/video on a screen.
 """
 
 from __future__ import annotations
@@ -29,7 +26,6 @@ DEFAULT_IP_FILE = ROOT_DIR / "scripts" / "swarm" / "drone_ips.txt"
 DEFAULT_SAVE_DIR = ROOT_DIR / "captures" / "fire_agent"
 DEFAULT_VIDEO_DIR = ROOT_DIR / "captures" / "fire_agent_videos"
 DEFAULT_RECORD_FPS = 20.0
-DEFAULT_CONFIDENCE_THRESHOLD = 0.25
 DEFAULT_DETECTION_PROFILE = "candle"
 DEFAULT_DETECT_EVERY_FRAMES = 5
 DEFAULT_HOLD_SECONDS = 2.0
@@ -74,7 +70,7 @@ from tello_stream import (  # noqa: E402
     resolve_path as resolve_root_path,
     stop_streaming_tello,
 )
-from yolo_utils import Detection, detect_labels_in_image, draw_detections, load_yolo_model  # noqa: E402
+from detection_utils import Detection, draw_detections  # noqa: E402
 
 
 WINDOW_NAME = "Tello Fire Agent"
@@ -116,7 +112,7 @@ def parse_args() -> argparse.Namespace:
         "--model",
         type=Path,
         default=None,
-        help="Local .onnx/.pt model path. If omitted, uses the cached/downloaded SuperBitDev/fire1 ONNX model.",
+        help="Local .onnx model path. If omitted, uses the cached/downloaded SuperBitDev/fire1 ONNX model.",
     )
     parser.add_argument("--repo-id", default=FIRE_MODEL_REPO_ID, help="Hugging Face model repo ID.")
     parser.add_argument(
@@ -126,12 +122,6 @@ def parse_args() -> argparse.Namespace:
         help="'candle' is more sensitive for small flames; 'miner' matches the published miner thresholds.",
     )
     parser.add_argument("--include-smoke", action="store_true", help="Also allow smoke boxes as fallback targets.")
-    parser.add_argument(
-        "--conf",
-        type=float,
-        default=DEFAULT_CONFIDENCE_THRESHOLD,
-        help="Confidence threshold for .pt fallback models. ONNX uses --profile thresholds.",
-    )
     parser.add_argument(
         "--detect-every",
         type=int,
@@ -260,50 +250,38 @@ def build_candidate_ips(args: argparse.Namespace) -> list[str]:
     )
 
 
-def detect_fire_with_fallback(
-    model,
+def detect_fire(
+    model: FireOnnxDetector,
     frame_bgr,
-    confidence_threshold: float,
     include_smoke: bool,
     center_zoom: bool,
     center_crop: float,
     center_include_full_frame: bool,
 ) -> list[Detection]:
-    if isinstance(model, FireOnnxDetector):
-        if center_zoom:
-            detections = predict_center_zoom(
-                model,
-                frame_bgr,
-                crop_fraction=center_crop,
-                include_full_frame=center_include_full_frame,
-            )
-        else:
-            detections = model.predict(frame_bgr)
-        return keep_fire_detections(detections, include_smoke=include_smoke)
-
-    target_substrings = {"fire", "flame", "smoke"} if include_smoke else {"fire", "flame"}
-    return detect_labels_in_image(
-        model,
-        frame_bgr,
-        target_substrings=target_substrings,
-        confidence_threshold=confidence_threshold,
-    )
+    if center_zoom:
+        detections = predict_center_zoom(
+            model,
+            frame_bgr,
+            crop_fraction=center_crop,
+            include_full_frame=center_include_full_frame,
+        )
+    else:
+        detections = model.predict(frame_bgr)
+    return keep_fire_detections(detections, include_smoke=include_smoke)
 
 
 def run_fire_detection(
     model,
     frame_bgr,
-    confidence_threshold: float,
     include_smoke: bool,
     center_zoom: bool,
     center_crop: float,
     center_include_full_frame: bool,
 ) -> tuple[list[Detection], float]:
     inference_start = time.perf_counter()
-    detections = detect_fire_with_fallback(
+    detections = detect_fire(
         model,
         frame_bgr,
-        confidence_threshold=confidence_threshold,
         include_smoke=include_smoke,
         center_zoom=center_zoom,
         center_crop=center_crop,
@@ -627,6 +605,8 @@ def main() -> None:
     save_dir = resolve_path(args.save_dir)
     video_dir = resolve_path(args.video_dir)
     model_path = resolve_path(args.model) if args.model is not None else get_fire_model_path(args.repo_id)
+    if model_path.suffix.lower() != ".onnx":
+        raise ValueError("The fire PoC expects an ONNX model. Use weights.onnx from SuperBitDev/fire1.")
     center_zoom = args.center_zoom
 
     tello = None
@@ -666,13 +646,9 @@ def main() -> None:
 
     try:
         print(f"Loading fire model: {model_path}")
-        if model_path.suffix.lower() == ".onnx":
-            model = FireOnnxDetector(model_path, profile=args.profile)
-            print(f"Model labels: {model.class_names}")
-            print(f"Detection profile: {model.profile}")
-        else:
-            model = load_yolo_model(str(model_path))
-            print(f"Model labels: {model.names}")
+        model = FireOnnxDetector(model_path, profile=args.profile)
+        print(f"Model labels: {model.class_names}")
+        print(f"Detection profile: {model.profile}")
 
         print(f"Using Chutes model: {args.chutes_model}")
         tello, frame_read, drone_ip, battery = connect_first_streaming_drone(
@@ -681,7 +657,7 @@ def main() -> None:
             usage_label="for fire agent",
         )
 
-        print("Safety note: do not fly near real fire, heat, smoke, candles, people, or fragile objects.")
+        print("Fire-agent mode. Start with dry run; pass --enable-flight only after the video and commands look correct.")
         detection_mode = f"center-zoom crop={args.center_crop:.2f}" if center_zoom else "full-frame"
         print(
             f"Controller: detection={detection_mode}, decision-every={args.decision_every:.1f}s, "
@@ -823,7 +799,6 @@ def main() -> None:
                     run_fire_detection,
                     model,
                     frame_bgr.copy(),
-                    args.conf,
                     args.include_smoke,
                     center_zoom,
                     args.center_crop,

@@ -26,35 +26,6 @@ SAFE_COMMAND_RANGES = {
 SAFE_EXACT_COMMANDS = {"stop"}
 
 
-AGENT_SYSTEM_PROMPT = """You are a cautious DJI Tello flight assistant.
-
-You receive YOLO person-detection data from the drone camera.
-Return exactly one Tello SDK command and nothing else.
-
-Allowed commands:
-- stop
-- cw 1..30
-- ccw 1..30
-- forward 20..50
-
-Rules:
-- The target is always a human. Never output land.
-- Do not output takeoff. The Python script handles takeoff/landing.
-- Use the derived control_state fields first. Do not reinterpret small raw offsets.
-- Apply these rules in order:
-  1. If person_found is false, output cw 20.
-  2. Else if distance_status is reached, output stop.
-  3. Else if horizontal_position is left, output ccw 15.
-  4. Else if horizontal_position is right, output cw 15.
-  5. Else if horizontal_position is centered and distance_status is too_far, output forward 50.
-  6. Else output stop.
-- If uncertain, output stop.
-- Do not use up/down, left/right, flip, go, curve, rc, emergency, or any other command.
-- Do not explain your decision.
-- Do not repeat these rules.
-- Your entire response must be exactly one command, for example: forward 50"""
-
-
 FIRE_AGENT_SYSTEM_PROMPT = """You are a cautious DJI Tello flight assistant.
 
 You receive fire detection data from the drone camera.
@@ -99,22 +70,6 @@ def get_chutes_api_key() -> str:
     if not api_key:
         raise RuntimeError("CHUTES_API_KEY is not set. Set it in your shell or in an ignored .env file.")
     return api_key
-
-
-def request_tello_command_from_chutes(
-    detection_context: dict[str, Any],
-    api_key: str,
-    model: str = DEFAULT_CHUTES_MODEL,
-    timeout_seconds: float = 60.0,
-) -> AgentDecision:
-    """Ask Chutes for one safe Tello command and validate the returned text."""
-    return request_command_from_chutes(
-        system_prompt=AGENT_SYSTEM_PROMPT,
-        user_message=build_chutes_user_message(detection_context),
-        api_key=api_key,
-        model=model,
-        timeout_seconds=timeout_seconds,
-    )
 
 
 def request_fire_command_from_chutes(
@@ -216,64 +171,6 @@ def parse_safe_tello_command(raw_text: str) -> str:
             return f"{action} {value}"
 
     return "stop"
-
-
-def add_control_state(detection_context: dict[str, Any]) -> dict[str, Any]:
-    """Add derived control labels so the LLM does not infer thresholds itself."""
-    if not detection_context.get("person_found"):
-        detection_context["control_state"] = {
-            "horizontal_position": "unknown",
-            "distance_status": "searching",
-        }
-        return detection_context
-
-    if detection_context.get("near_enough"):
-        distance_status = "reached"
-    else:
-        distance_status = "too_far"
-
-    try:
-        x_offset = float(detection_context.get("center_offset_x_percent", 0))
-    except (TypeError, ValueError):
-        x_offset = 0
-
-    if x_offset < -15:
-        horizontal_position = "left"
-    elif x_offset > 15:
-        horizontal_position = "right"
-    else:
-        horizontal_position = "centered"
-
-    detection_context["control_state"] = {
-        "horizontal_position": horizontal_position,
-        "distance_status": distance_status,
-        "center_deadband_percent": 15,
-    }
-    return detection_context
-
-
-def build_chutes_user_message(detection_context: dict[str, Any]) -> str:
-    """Build a concise, unambiguous command-selection message."""
-    context = add_control_state(dict(detection_context))
-    control_state = context.get("control_state", {})
-
-    decision_input = {
-        "person_found": context.get("person_found"),
-        "horizontal_position": control_state.get("horizontal_position"),
-        "distance_status": control_state.get("distance_status"),
-        "center_offset_x_percent": context.get("center_offset_x_percent"),
-        "object_coverage_percentage": context.get("object_coverage_percentage"),
-        "near_enough": context.get("near_enough"),
-    }
-
-    return (
-        "Choose exactly one Tello SDK command from the rules.\n"
-        "Use DECISION_INPUT first; FULL_DETECTION_JSON is only supporting context.\n"
-        "DECISION_INPUT:\n"
-        + json.dumps(decision_input, separators=(",", ":"))
-        + "\nFULL_DETECTION_JSON:\n"
-        + json.dumps(context, separators=(",", ":"))
-    )
 
 
 def add_fire_control_state(detection_context: dict[str, Any]) -> dict[str, Any]:

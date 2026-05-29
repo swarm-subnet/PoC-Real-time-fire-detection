@@ -1,4 +1,4 @@
-"""Helpers for the SuperBitDev/fire1 YOLO fire model."""
+"""Helpers for the SuperBitDev/fire1 ONNX fire model."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from urllib.parse import quote
 import cv2
 import numpy as np
 
-from yolo_utils import Detection
+from detection_utils import Detection
 
 
 FIRE_MODEL_REPO_ID = "SuperBitDev/fire1"
@@ -24,7 +24,7 @@ DEFAULT_FIRE_SAMPLE_URL = (
     "Woolsey%20Flames%20%2854811019352%29.jpg?width=1024"
 )
 DEFAULT_FIRE_SAMPLE_PATH = Path(__file__).resolve().parents[1] / "samples" / "fire" / "woolsey_flames.jpg"
-USER_AGENT = "swarm-tello-drone/1.0 (+https://github.com/swarm-subnet/swarm-tello-drone)"
+USER_AGENT = "poc-real-time-fire-detection/1.0 (+https://github.com/swarm-subnet/PoC-Real-time-fire-detection)"
 
 
 def open_url(url: str, timeout: int):
@@ -43,13 +43,13 @@ def list_huggingface_repo_files(repo_id: str = FIRE_MODEL_REPO_ID) -> list[str]:
 
 
 def select_model_weight_file(files: list[str]) -> str:
-    """Pick the most likely YOLO weight file from a Hugging Face repo."""
+    """Pick the ONNX weight file from a Hugging Face repo."""
     weight_files = [
         file for file in files
-        if file.lower().endswith((".pt", ".onnx"))
+        if file.lower().endswith(".onnx")
     ]
     if not weight_files:
-        raise RuntimeError("No .pt or .onnx YOLO weight file found in the Hugging Face repo.")
+        raise RuntimeError("No .onnx weight file found in the Hugging Face repo.")
 
     def score(path: str) -> tuple[int, int, str]:
         lower = path.lower()
@@ -82,7 +82,7 @@ def download_huggingface_file(repo_id: str, filename: str, output_path: Path) ->
 
 
 def get_fire_model_path(repo_id: str = FIRE_MODEL_REPO_ID, model_dir: Path = FIRE_MODEL_DIR) -> Path:
-    """Find and cache the fire model's YOLO weight file."""
+    """Find and cache the fire model's ONNX weight file."""
     cached_weights = model_dir / "weights.onnx"
     if cached_weights.exists() and cached_weights.stat().st_size > 0:
         return cached_weights
@@ -462,7 +462,7 @@ class FireOnnxDetector:
         boxes, scores, class_ids = self._per_view_pipeline(boxes, scores, class_ids)
         return self._build_detections(boxes, scores, class_ids)
 
-    def _decode_raw_yolo(
+    def _decode_raw_output(
         self,
         predictions: np.ndarray,
         ratio: float,
@@ -521,7 +521,7 @@ class FireOnnxDetector:
             return self._decode_final_detections(output, ratio, pad, original_size)
         if output.ndim == 3 and output.shape[0] == 1 and output.shape[2] == 6:
             return self._decode_final_detections(output, ratio, pad, original_size)
-        return self._decode_raw_yolo(output, ratio, pad, original_size)
+        return self._decode_raw_output(output, ratio, pad, original_size)
 
     def _predict_single(self, image_bgr) -> list[Detection]:
         input_tensor, ratio, pad, original_size = self._preprocess(image_bgr)
