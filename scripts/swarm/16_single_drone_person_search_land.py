@@ -23,7 +23,6 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from swarm_detector import (  # noqa: E402
-    DEFAULT_PERSON_CONFIDENCE,
     DEFAULT_PERSON_IMGSZ,
     DEFAULT_PERSON_MODEL,
     PersonDetectorConfig,
@@ -43,6 +42,13 @@ from swarm_utils import (  # noqa: E402
 )
 
 
+SINGLE_DRONE_DEFAULT_PERSON_CONFIDENCE = 0.70
+SINGLE_DRONE_DEFAULT_CONFIRM_DETECTIONS = 7
+SINGLE_DRONE_DEFAULT_CONFIRM_WINDOW_SECONDS = 4.0
+SINGLE_DRONE_DEFAULT_MIN_PERSON_HEIGHT_RATIO = 0.20
+SINGLE_DRONE_DEFAULT_MIN_PERSON_AREA_RATIO = 0.025
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Open one Tello live preview, then press G to yaw-search for a person and land."
@@ -60,13 +66,49 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--yaw-step-degrees", type=int, default=20, help="Yaw step during search. Default: 20.")
     parser.add_argument("--yaw-interval", type=float, default=1.2, help="Seconds between yaw steps. Default: 1.2.")
     parser.add_argument("--takeoff-settle", type=float, default=3.0, help="Seconds to settle after takeoff. Default: 3.")
-    parser.add_argument("--confirm-detections", type=int, default=5, help="Detections required before landing. Default: 5.")
-    parser.add_argument("--confirm-window", type=float, default=3.0, help="Confirmation window in seconds. Default: 3.")
+    parser.add_argument(
+        "--confirm-detections",
+        type=int,
+        default=SINGLE_DRONE_DEFAULT_CONFIRM_DETECTIONS,
+        help=f"Detections required before landing. Default: {SINGLE_DRONE_DEFAULT_CONFIRM_DETECTIONS}.",
+    )
+    parser.add_argument(
+        "--confirm-window",
+        type=float,
+        default=SINGLE_DRONE_DEFAULT_CONFIRM_WINDOW_SECONDS,
+        help=f"Confirmation window in seconds. Default: {SINGLE_DRONE_DEFAULT_CONFIRM_WINDOW_SECONDS}.",
+    )
     parser.add_argument("--no-preview", action="store_true", help="Disable preview and run the old immediate takeoff/search/land flow.")
     parser.add_argument("--detection-hold", type=float, default=1.5, help="Seconds to keep the detection box visible before landing. Default: 1.5.")
     parser.add_argument("--person-model", default=DEFAULT_PERSON_MODEL, help=f"YOLO model. Default: {DEFAULT_PERSON_MODEL}.")
     parser.add_argument("--person-imgsz", type=int, default=DEFAULT_PERSON_IMGSZ, help=f"Inference image size. Default: {DEFAULT_PERSON_IMGSZ}.")
-    parser.add_argument("--person-conf", type=float, default=DEFAULT_PERSON_CONFIDENCE, help=f"Minimum person confidence. Default: {DEFAULT_PERSON_CONFIDENCE}.")
+    parser.add_argument(
+        "--person-conf",
+        type=float,
+        default=SINGLE_DRONE_DEFAULT_PERSON_CONFIDENCE,
+        help=(
+            "Minimum person confidence for single-drone autonomous confirmation. "
+            f"Default: {SINGLE_DRONE_DEFAULT_PERSON_CONFIDENCE}."
+        ),
+    )
+    parser.add_argument(
+        "--min-person-height-ratio",
+        type=float,
+        default=SINGLE_DRONE_DEFAULT_MIN_PERSON_HEIGHT_RATIO,
+        help=(
+            "Minimum detected bbox height as fraction of frame height before autonomous confirmation. "
+            f"Default: {SINGLE_DRONE_DEFAULT_MIN_PERSON_HEIGHT_RATIO}."
+        ),
+    )
+    parser.add_argument(
+        "--min-person-area-ratio",
+        type=float,
+        default=SINGLE_DRONE_DEFAULT_MIN_PERSON_AREA_RATIO,
+        help=(
+            "Minimum detected bbox area as fraction of frame area before autonomous confirmation. "
+            f"Default: {SINGLE_DRONE_DEFAULT_MIN_PERSON_AREA_RATIO}."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -85,6 +127,8 @@ def main() -> None:
         confirmation_detections=args.confirm_detections,
         confirmation_window_seconds=args.confirm_window,
         min_confidence=args.person_conf,
+        min_detection_area_ratio=args.min_person_area_ratio,
+        min_detection_height_ratio=args.min_person_height_ratio,
         preview_enabled=not args.no_preview,
         detection_hold_seconds=args.detection_hold,
     )
@@ -162,6 +206,10 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--person-imgsz must be greater than 0")
     if not (0.0 < args.person_conf <= 1.0):
         raise ValueError("--person-conf must be in (0, 1]")
+    if not (0.0 <= args.min_person_height_ratio <= 1.0):
+        raise ValueError("--min-person-height-ratio must be in [0, 1]")
+    if not (0.0 <= args.min_person_area_ratio <= 1.0):
+        raise ValueError("--min-person-area-ratio must be in [0, 1]")
 
 
 if __name__ == "__main__":

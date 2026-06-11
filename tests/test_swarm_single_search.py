@@ -79,6 +79,31 @@ class FakeController:
         self.commands.append("close")
 
 
+class StopDuringPreflightController(FakeController):
+    def __init__(self, ip: str) -> None:
+        super().__init__(ip)
+        self.stop_event = None
+
+    def check_all_ready(self, **_kwargs) -> bool:
+        self.commands.append("ready")
+        if self.stop_event is not None:
+            self.stop_event.set()
+        return True
+
+
+class StopAfterTakeoffController(FakeController):
+    def __init__(self, ip: str) -> None:
+        super().__init__(ip)
+        self.stop_event = None
+
+    def takeoff_sequential(self, **_kwargs) -> bool:
+        self.commands.append("takeoff")
+        self.airborne = True
+        if self.stop_event is not None:
+            self.stop_event.set()
+        return True
+
+
 class FakeCamera:
     def __init__(self, ip: str) -> None:
         self.ip = ip
@@ -101,15 +126,21 @@ class FakeDetector:
     def __init__(self, ip: str) -> None:
         self.ip = ip
         self.calls = 0
+        self.loaded = True
+        self.started = False
+        self.ensure_ready_calls = 0
+        self.start_calls = 0
 
     def ensure_ready(self) -> None:
-        pass
+        self.ensure_ready_calls += 1
+        self.loaded = True
 
     def start(self) -> None:
-        pass
+        self.start_calls += 1
+        self.started = True
 
     def stop(self) -> None:
-        pass
+        self.started = False
 
     def update_frames(self, _frames, _versions) -> None:
         self.calls += 1
@@ -131,12 +162,14 @@ class FakeDetector:
         }
 
     def snapshot_stats(self):
+        total_detections = 1 if self.calls >= 3 else 0
         return SimpleNamespace(
-            loaded=True,
-            status="ready:mock",
+            loaded=self.loaded,
+            status="running:mock" if self.started else "ready:mock",
             last_error="",
             last_inference_ms=1.0,
             total_batches=self.calls,
+            total_detections=total_detections,
             overall_fps=30.0,
         )
 
@@ -244,6 +277,7 @@ class SingleDroneSearchRunnerTests(unittest.TestCase):
     def test_preview_g_starts_search_then_lands_without_forward_motion(self) -> None:
         ip = "192.168.100.89"
         controller = FakeController(ip)
+        detector = FakeDetector(ip)
         config = SingleDroneSearchConfig(
             max_search_seconds=2.0,
             yaw_step_degrees=20,
@@ -254,6 +288,7 @@ class SingleDroneSearchRunnerTests(unittest.TestCase):
             max_detection_age_seconds=10.0,
             min_confidence=0.2,
             preview_enabled=True,
+            completion_hold_seconds=0,
         )
         runner = KeyedPreviewApp(
             ip,
@@ -261,7 +296,7 @@ class SingleDroneSearchRunnerTests(unittest.TestCase):
             config,
             controller=controller,  # type: ignore[arg-type]
             camera=FakeCamera(ip),  # type: ignore[arg-type]
-            detector=FakeDetector(ip),  # type: ignore[arg-type]
+            detector=detector,  # type: ignore[arg-type]
             keys=[ord("g")],
         )
 
@@ -269,12 +304,68 @@ class SingleDroneSearchRunnerTests(unittest.TestCase):
 
         self.assertTrue(result.detected)
         self.assertTrue(result.landed)
+        self.assertEqual(runner._completion_banner, "PERSON DETECTED - LANDED")
+        self.assertTrue(runner._completion_success)
+        self.assertGreaterEqual(detector.start_calls, 1)
+        self.assertGreaterEqual(detector.calls, 1)
         self.assertIn("ready", controller.commands)
         self.assertIn("takeoff", controller.commands)
         self.assertIn("cw 20", controller.commands)
         self.assertIn("stop", controller.commands)
         self.assertIn("land", controller.commands)
         self.assertNotIn("forward 20", controller.commands)
+
+    def test_autonomous_stop_during_preflight_does_not_take_off(self) -> None:
+        ip = "192.168.100.89"
+        controller = StopDuringPreflightController(ip)
+        detector = FakeDetector(ip)
+        detector.calls = 1
+        config = SingleDroneSearchConfig(preview_enabled=True, completion_hold_seconds=0)
+        runner = SingleDroneSearchPreviewApp(
+            ip,
+            PersonDetectorConfig(),
+            config,
+            controller=controller,  # type: ignore[arg-type]
+            camera=FakeCamera(ip),  # type: ignore[arg-type]
+            detector=detector,  # type: ignore[arg-type]
+        )
+        runner._detector_processing_started = True
+        controller.stop_event = runner._stop_event
+
+        result = runner._autonomous_run(None)
+
+        self.assertFalse(result.detected)
+        self.assertEqual(result.reason, "operator stop before takeoff")
+        self.assertIn("ready", controller.commands)
+        self.assertNotIn("takeoff", controller.commands)
+        self.assertNotIn("land", controller.commands)
+
+    def test_autonomous_stop_after_takeoff_lands_without_yaw_search(self) -> None:
+        ip = "192.168.100.89"
+        controller = StopAfterTakeoffController(ip)
+        detector = FakeDetector(ip)
+        detector.calls = 1
+        config = SingleDroneSearchConfig(preview_enabled=True, takeoff_settle_seconds=0, completion_hold_seconds=0)
+        runner = SingleDroneSearchPreviewApp(
+            ip,
+            PersonDetectorConfig(),
+            config,
+            controller=controller,  # type: ignore[arg-type]
+            camera=FakeCamera(ip),  # type: ignore[arg-type]
+            detector=detector,  # type: ignore[arg-type]
+        )
+        runner._detector_processing_started = True
+        controller.stop_event = runner._stop_event
+
+        result = runner._autonomous_run(None)
+
+        self.assertFalse(result.detected)
+        self.assertTrue(result.landed)
+        self.assertEqual(result.reason, "operator stop after takeoff")
+        self.assertIn("ready", controller.commands)
+        self.assertIn("takeoff", controller.commands)
+        self.assertIn("land", controller.commands)
+        self.assertNotIn("cw 20", controller.commands)
 
 
 if __name__ == "__main__":

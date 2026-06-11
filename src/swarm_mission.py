@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+import math
 import time
 from typing import Protocol
 
@@ -51,6 +52,8 @@ class SearchMissionConfig:
     confirmation_window_seconds: float = 3.0
     max_detection_age_seconds: float = 1.5
     min_confidence: float = 0.2
+    min_detection_area_ratio: float = 0.0
+    min_detection_height_ratio: float = 0.0
     center_tolerance_ratio: float = 0.15
     lost_target_seconds: float = 2.0
     yaw_step_degrees: int = 20
@@ -67,6 +70,8 @@ class DetectionObservation:
     ip: str
     confidence: float
     bbox_center_x: float
+    bbox_width: float
+    bbox_height: float
     frame_width: int
     frame_height: int
     detected_at_monotonic: float
@@ -78,6 +83,18 @@ class DetectionObservation:
         image_center = self.frame_width * 0.5
         half_width = max(1.0, image_center)
         return (self.bbox_center_x - image_center) / half_width
+
+    @property
+    def area_ratio(self) -> float:
+        if self.frame_width <= 0 or self.frame_height <= 0:
+            return 0.0
+        return (self.bbox_width * self.bbox_height) / float(self.frame_width * self.frame_height)
+
+    @property
+    def height_ratio(self) -> float:
+        if self.frame_height <= 0:
+            return 0.0
+        return self.bbox_height / float(self.frame_height)
 
 
 @dataclass(frozen=True)
@@ -132,6 +149,10 @@ class DetectionAggregator:
                 if observation is None:
                     continue
                 if observation.confidence < self.config.min_confidence:
+                    continue
+                if observation.area_ratio < self.config.min_detection_area_ratio:
+                    continue
+                if observation.height_ratio < self.config.min_detection_height_ratio:
                     continue
                 existing.append(observation)
             cutoff = now - self.config.confirmation_window_seconds
@@ -390,7 +411,7 @@ class SearchMission:
 
 def observation_from_detection(detection: DetectionLike) -> DetectionObservation | None:
     try:
-        x1, _y1, x2, _y2 = detection.xyxy
+        x1, y1, x2, y2 = detection.xyxy
         frame_height, frame_width = detection.frame_shape
         confidence = float(detection.confidence)
         detected_at = float(detection.detected_at_monotonic)
@@ -398,11 +419,23 @@ def observation_from_detection(detection: DetectionLike) -> DetectionObservation
         return None
     if frame_width <= 0 or frame_height <= 0:
         return None
-    center_x = (float(x1) + float(x2)) * 0.5
+    x1 = float(x1)
+    x2 = float(x2)
+    y1 = float(y1)
+    y2 = float(y2)
+    if not all(math.isfinite(value) for value in (x1, y1, x2, y2, confidence, detected_at)):
+        return None
+    bbox_width = max(0.0, x2 - x1)
+    bbox_height = max(0.0, y2 - y1)
+    if bbox_width <= 0 or bbox_height <= 0:
+        return None
+    center_x = (x1 + x2) * 0.5
     return DetectionObservation(
         ip=detection.ip,
         confidence=confidence,
         bbox_center_x=center_x,
+        bbox_width=bbox_width,
+        bbox_height=bbox_height,
         frame_width=int(frame_width),
         frame_height=int(frame_height),
         detected_at_monotonic=detected_at,

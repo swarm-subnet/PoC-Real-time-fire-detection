@@ -28,10 +28,17 @@ class FakeDetection:
     detected_at_monotonic: float
 
 
-def detection(ip: str, center_x: float, now: float, confidence: float = 0.8) -> FakeDetection:
+def detection(
+    ip: str,
+    center_x: float,
+    now: float,
+    confidence: float = 0.8,
+    width: float = 40.0,
+    height: float = 80.0,
+) -> FakeDetection:
     return FakeDetection(
         ip=ip,
-        xyxy=(center_x - 20, 40, center_x + 20, 120),
+        xyxy=(center_x - width * 0.5, 40, center_x + width * 0.5, 40 + height),
         confidence=confidence,
         frame_shape=(240, 320),
         detected_at_monotonic=now,
@@ -68,6 +75,24 @@ class SearchMissionTests(unittest.TestCase):
         self.assertEqual(mission.snapshot().tracker_ip, "1")
         self.assertEqual(mission.snapshot().state, MissionState.TRACKER_ACQUIRE)
         self.assertEqual([command.command for command in commands], ["stop"])
+
+    def test_small_detection_is_not_confirmed_as_tracker(self) -> None:
+        config = SearchMissionConfig(
+            confirmation_detections=2,
+            confirmation_window_seconds=3.0,
+            max_detection_age_seconds=1.0,
+            min_confidence=0.55,
+            min_detection_area_ratio=0.025,
+            min_detection_height_ratio=0.20,
+            yaw_interval_seconds=10.0,
+        )
+        mission = SearchMission(["1"], config)
+        mission.start_search(now=0.0)
+        mission.tick({"1": [detection("1", 160, 0.0, confidence=0.9, width=24, height=30)]}, now=0.0)
+        mission.tick({"1": [detection("1", 160, 0.5, confidence=0.9, width=24, height=30)]}, now=0.5)
+
+        self.assertIsNone(mission.snapshot().tracker_ip)
+        self.assertEqual(mission.snapshot().detections_by_ip["1"], 0)
 
     def test_off_center_target_yaws_before_forward(self) -> None:
         mission = SearchMission(["1"], self.config())

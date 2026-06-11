@@ -32,11 +32,14 @@ class SingleDroneSearchConfig:
     confirmation_window_seconds: float = 3.0
     max_detection_age_seconds: float = 1.5
     min_confidence: float = 0.2
+    min_detection_area_ratio: float = 0.0
+    min_detection_height_ratio: float = 0.0
     preview_enabled: bool = True
     preview_window_name: str = "Single Drone Person Search"
     preview_width: int = 1280
     preview_height: int = 820
     detection_hold_seconds: float = 1.5
+    completion_hold_seconds: float = 4.0
     detector_ready_timeout_seconds: float = 60.0
 
 
@@ -72,6 +75,10 @@ class SingleDroneSearchRunner:
         self._preview_window_created = False
         self._last_status_message = "starting"
         self._last_frame_age_seconds: float | None = None
+        self._detector_processing_started = False
+        self._detector_error: str | None = None
+        self._completion_banner: str | None = None
+        self._completion_success = False
         self.aggregator = DetectionAggregator(
             [ip],
             SearchMissionConfig(
@@ -79,6 +86,8 @@ class SingleDroneSearchRunner:
                 confirmation_window_seconds=self.config.confirmation_window_seconds,
                 max_detection_age_seconds=self.config.max_detection_age_seconds,
                 min_confidence=self.config.min_confidence,
+                min_detection_area_ratio=self.config.min_detection_area_ratio,
+                min_detection_height_ratio=self.config.min_detection_height_ratio,
                 yaw_step_degrees=self.config.yaw_step_degrees,
                 yaw_interval_seconds=self.config.yaw_interval_seconds,
             ),
@@ -93,6 +102,7 @@ class SingleDroneSearchRunner:
             self._status(status, "starting video stream")
             self.camera.start()
             self.detector.start()
+            self._detector_processing_started = True
 
             self._status(status, "preflight")
             ready = self.controller.check_all_ready(
@@ -205,6 +215,7 @@ class SingleDroneSearchRunner:
         cv2.putText(canvas, label, (panel_x + 12, panel_y + 21), cv2.FONT_HERSHEY_SIMPLEX, 0.56, (238, 244, 240), 1, cv2.LINE_AA)
 
         self._draw_status(canvas)
+        self._draw_completion_banner(canvas)
         return canvas
 
     def _hold_detection_preview(self, frame: np.ndarray | None, detections: list[DetectionLike]) -> None:
@@ -244,15 +255,46 @@ class SingleDroneSearchRunner:
         )
         cv2.line(frame, (width // 2, 98), (width // 2, footer_y - 12), (80, 160, 255), 1)
 
+    def _draw_completion_banner(self, frame: np.ndarray) -> None:
+        if not self._completion_banner:
+            return
+        height, width = frame.shape[:2]
+        banner_w = min(width - 120, 760)
+        banner_h = 96
+        x1 = max(20, (width - banner_w) // 2)
+        y1 = max(110, height // 2 - banner_h // 2)
+        x2 = x1 + banner_w
+        y2 = y1 + banner_h
+        fill = (32, 92, 48) if self._completion_success else (80, 58, 34)
+        border = (80, 240, 120) if self._completion_success else (80, 180, 255)
+        cv2.rectangle(frame, (x1, y1), (x2, y2), fill, -1)
+        cv2.rectangle(frame, (x1, y1), (x2, y2), border, 3)
+        cv2.putText(
+            frame,
+            self._completion_banner,
+            (x1 + 28, y1 + 60),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1.2,
+            (240, 255, 245),
+            3,
+            cv2.LINE_AA,
+        )
+
     def _detector_status_text(self) -> str:
         stats = self.detector.snapshot_stats()
         age_text = "frame_age=n/a" if self._last_frame_age_seconds is None else f"frame_age={self._last_frame_age_seconds * 1000:.0f}ms"
-        if stats.status == "error":
-            return f"{age_text}   detector=error:{stats.last_error[:80]}"
+        if self._detector_error or stats.status == "error":
+            message = self._detector_error or stats.last_error
+            return f"{age_text}   detector=error:{message[:80]}"
         if not stats.loaded:
-            return f"{age_text}   detector={stats.status}; video should already be live"
+            return f"{age_text}   detector=loading ({stats.status})"
+        if not self._detector_processing_started:
+            return f"{age_text}   detector=model ready; starting inference"
         last_ms = "n/a" if stats.last_inference_ms is None else f"{stats.last_inference_ms:.0f}ms"
-        return f"{age_text}   detector=ready infer={last_ms} batches={stats.total_batches} fps={stats.overall_fps:.1f}"
+        return (
+            f"{age_text}   detector=running infer={last_ms} "
+            f"batches={stats.total_batches} detections={stats.total_detections} fps={stats.overall_fps:.1f}"
+        )
 
     @staticmethod
     def _draw_detections(frame: np.ndarray, detections: list[DetectionLike]) -> None:
@@ -348,19 +390,26 @@ class SingleDroneSearchPreviewApp(SingleDroneSearchRunner):
         self._action_lock = threading.RLock()
         self._action_thread: threading.Thread | None = None
         self._last_action_result: SingleDroneSearchResult | None = None
+        self._detector_loader_thread: threading.Thread | None = None
+        self._detector_processing_started = False
+        self._detector_error: str | None = None
+        self._last_detector_phase = ""
+        self._last_detector_report_at = 0.0
 
     def run(self, status: StatusCallback | None = None) -> SingleDroneSearchResult:
         result = SingleDroneSearchResult(False, False, "quit before autonomous run")
         try:
             self._status(status, "starting live preview")
             self.camera.start()
-            self._status(status, "live preview ready; detector loading in background")
-            self.detector.start()
+            self._status(status, "live preview ready; loading detector")
+            self._start_detector_loader(status)
 
             while not self._stop_event.is_set():
                 snapshot = self.camera.get_snapshot(copy=False)
                 self._record_frame_age(snapshot)
                 self.detector.update_frames(snapshot.frames, snapshot.frame_versions)
+                self._maybe_start_detector_processing(status)
+                self._report_detector_status(status)
                 detections = self.detector.get_detections()
                 key = self._render_preview(snapshot.frames.get(self.ip), detections.get(self.ip, []))
                 if key is not None:
@@ -392,6 +441,72 @@ class SingleDroneSearchPreviewApp(SingleDroneSearchRunner):
             self.camera.stop()
             self._close_preview()
             self.controller.close()
+
+    def _start_detector_loader(self, status: StatusCallback | None) -> None:
+        if self._detector_loader_thread is not None and self._detector_loader_thread.is_alive():
+            return
+        stats = self.detector.snapshot_stats()
+        if stats.loaded:
+            return
+
+        def load_detector() -> None:
+            try:
+                self._status(status, "detector loading model")
+                self.detector.ensure_ready()
+                self._detector_error = None
+                self._status(status, "detector model ready")
+            except Exception as error:
+                self._detector_error = str(error)
+                self._status(status, f"detector failed: {error}")
+
+        self._detector_loader_thread = threading.Thread(target=load_detector, daemon=True)
+        self._detector_loader_thread.start()
+
+    def _maybe_start_detector_processing(self, status: StatusCallback | None) -> None:
+        if self._detector_processing_started:
+            return
+        stats = self.detector.snapshot_stats()
+        if not stats.loaded:
+            return
+        try:
+            self.detector.start()
+            self._detector_processing_started = True
+            self._status(status, "detector inference running")
+        except Exception as error:
+            self._detector_error = str(error)
+            self._status(status, f"detector start failed: {error}")
+
+    def _report_detector_status(self, status: StatusCallback | None) -> None:
+        stats = self.detector.snapshot_stats()
+        now = time.monotonic()
+        phase = self._detector_phase(stats)
+        should_report = phase != self._last_detector_phase or now - self._last_detector_report_at >= 5.0
+        if not should_report:
+            return
+        self._last_detector_phase = phase
+        self._last_detector_report_at = now
+        if phase == "error":
+            message = self._detector_error or stats.last_error or "unknown detector error"
+            self._status(status, f"detector error: {message}")
+        elif phase == "loading":
+            self._status(status, f"detector loading: {stats.status}")
+        elif phase == "starting":
+            self._status(status, "detector loaded; starting inference")
+        elif phase == "waiting_first_batch":
+            self._status(status, "detector running; waiting for first inference batch")
+        elif phase == "active":
+            self._status(status, "detector inference active")
+
+    def _detector_phase(self, stats: object) -> str:
+        if self._detector_error or getattr(stats, "status", "") == "error":
+            return "error"
+        if not getattr(stats, "loaded", False):
+            return "loading"
+        if not self._detector_processing_started:
+            return "starting"
+        if getattr(stats, "total_batches", 0) <= 0:
+            return "waiting_first_batch"
+        return "active"
 
     def _handle_preview_key(self, key: int, status: StatusCallback | None) -> None:
         char = chr(key).lower() if 0 <= key < 256 else ""
@@ -435,11 +550,15 @@ class SingleDroneSearchPreviewApp(SingleDroneSearchRunner):
     def _autonomous_run(self, status: StatusCallback | None) -> SingleDroneSearchResult:
         if not self._wait_for_detector_ready(status):
             return SingleDroneSearchResult(False, False, "detector not ready")
+        if self._stop_event.is_set():
+            return SingleDroneSearchResult(False, False, "operator stop before takeoff")
         if self.controller.any_airborne():
             self._status(status, "already airborne; starting yaw search")
         elif not self._preflight(status):
             return SingleDroneSearchResult(False, False, "preflight failed")
         else:
+            if self._stop_event.is_set():
+                return SingleDroneSearchResult(False, False, "operator stop before takeoff")
             self._status(status, "takeoff")
             if not self.controller.takeoff_sequential(
                 settle_seconds=self.config.takeoff_settle_seconds,
@@ -447,26 +566,51 @@ class SingleDroneSearchPreviewApp(SingleDroneSearchRunner):
             ):
                 landed = self._land(status)
                 return SingleDroneSearchResult(False, landed, "takeoff failed")
+            if self._stop_event.is_set():
+                landed = self._land(status)
+                return SingleDroneSearchResult(False, landed, "operator stop after takeoff")
 
         self._reset_detection_history()
         result = self._search_from_preview_detector(status)
         landed = self._land(status)
         final_result = SingleDroneSearchResult(result.detected, landed, result.reason, result.candidate)
-        self._status(status, f"autonomous complete: {final_result.reason}")
+        self._set_completion_result(final_result, status)
+        self._hold_completion_result()
         self._stop_event.set()
         return final_result
+
+    def _set_completion_result(self, result: SingleDroneSearchResult, status: StatusCallback | None) -> None:
+        if result.detected:
+            banner = "PERSON DETECTED - LANDED" if result.landed else "PERSON DETECTED"
+            self._completion_success = True
+        else:
+            banner = "SEARCH COMPLETE - NOT DETECTED"
+            self._completion_success = False
+        self._completion_banner = banner
+        self._status(status, banner)
+
+    def _hold_completion_result(self) -> None:
+        deadline = time.monotonic() + self.config.completion_hold_seconds
+        while time.monotonic() < deadline and not self._stop_event.is_set():
+            time.sleep(0.05)
 
     def _wait_for_detector_ready(self, status: StatusCallback | None) -> bool:
         deadline = time.monotonic() + self.config.detector_ready_timeout_seconds
         last_status = ""
         while time.monotonic() < deadline and not self._stop_event.is_set():
             stats = self.detector.snapshot_stats()
-            if stats.loaded:
-                return True
-            if stats.status == "error":
-                self._status(status, f"search blocked: {stats.last_error}")
+            if self._detector_error or stats.status == "error":
+                message = self._detector_error or stats.last_error
+                self._status(status, f"search blocked: {message}")
                 return False
-            status_text = f"waiting for detector before takeoff: {stats.status}"
+            if stats.loaded and self._detector_processing_started and stats.total_batches > 0:
+                return True
+            if not stats.loaded:
+                status_text = f"waiting for detector model before takeoff: {stats.status}"
+            elif not self._detector_processing_started:
+                status_text = "waiting for detector inference thread before takeoff"
+            else:
+                status_text = "waiting for first detector inference before takeoff"
             if status_text != last_status:
                 self._status(status, status_text)
                 last_status = status_text
@@ -518,6 +662,8 @@ class SingleDroneSearchPreviewApp(SingleDroneSearchRunner):
                 confirmation_window_seconds=self.config.confirmation_window_seconds,
                 max_detection_age_seconds=self.config.max_detection_age_seconds,
                 min_confidence=self.config.min_confidence,
+                min_detection_area_ratio=self.config.min_detection_area_ratio,
+                min_detection_height_ratio=self.config.min_detection_height_ratio,
                 yaw_step_degrees=self.config.yaw_step_degrees,
                 yaw_interval_seconds=self.config.yaw_interval_seconds,
             ),

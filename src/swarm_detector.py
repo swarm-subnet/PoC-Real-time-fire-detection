@@ -118,6 +118,9 @@ class SwarmPersonDetector:
             return
         self._stop_event.clear()
         self._started_at = time.monotonic()
+        with self._lock:
+            if not self._loaded:
+                self._status = "starting"
         self._thread = threading.Thread(target=self._run_loop, daemon=True)
         self._thread.start()
 
