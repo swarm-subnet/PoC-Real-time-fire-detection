@@ -177,7 +177,7 @@ This is the main camera-only test. It opens the drone stream, detects fire, draw
 python scripts/fire/02_live_fire_detection_save_by_ip.py --ip 192.168.1.132
 ```
 
-If `--ip` is omitted, the script tries IPs from [scripts/swarm/drone_ips.txt](scripts/swarm/drone_ips.txt), then falls back to direct mode at `192.168.10.1`.
+If `--ip` is omitted, the script tries IPs from [scripts/swarm/config/drone_ips.txt](scripts/swarm/config/drone_ips.txt), then falls back to direct mode at `192.168.10.1`.
 
 Useful options:
 
@@ -249,9 +249,10 @@ python scripts/04_camera_preview.py
 Station-mode and multi-drone utilities:
 
 ```bash
-python scripts/swarm/09_setup_new_drone.py --ssid <wifi-name> --password <wifi-password>
-python scripts/swarm/08_wifi_motor_spin_by_ip.py
-python scripts/swarm/10_swarm_controller.py
+python scripts/swarm/provisioning/09_setup_new_drone.py --ssid <wifi-name> --password <wifi-password>
+python scripts/swarm/diagnostics/08_wifi_motor_spin_by_ip.py
+python scripts/swarm/control/10_swarm_controller.py
+python scripts/swarm/dashboard/13_swarm_dashboard.py
 ```
 
 Depth experiments are intentionally documented separately in [scripts/depth/README.md](scripts/depth/README.md).
@@ -276,10 +277,20 @@ Depth experiments are intentionally documented separately in [scripts/depth/READ
 |   |   |-- README.md
 |   |   `-- 01_depth_capture.py
 |   `-- swarm/
-|       |-- 08_wifi_motor_spin_by_ip.py
-|       |-- 09_setup_new_drone.py
-|       |-- 10_swarm_controller.py
-|       `-- drone_ips.txt
+|       |-- README.md
+|       |-- config/
+|       |   `-- drone_ips.txt
+|       |-- control/
+|       |   `-- 10_swarm_controller.py
+|       |-- dashboard/
+|       |   `-- 13_swarm_dashboard.py
+|       |-- diagnostics/
+|       |   |-- 08_wifi_motor_spin_by_ip.py
+|       |   |-- 11_battery_motor_drain_by_ip.py
+|       |   `-- 12_swarm_hover_battery_test.py
+|       `-- provisioning/
+|           |-- 09_setup_new_drone.py
+|           `-- 14_auto_setup_tello_wifi.py
 |-- src/
 |   |-- chutes_agent.py
 |   |-- detection_utils.py

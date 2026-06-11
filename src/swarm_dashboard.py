@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
+from swarm_detector import PersonDetection, PersonDetectorStats
 from swarm_state import DroneRuntimeState
 
 
@@ -16,6 +17,8 @@ class DashboardViewState:
     banner: str = "idle"
     camera_enabled: bool = False
     camera_frames: dict[str, np.ndarray] | None = None
+    person_detections: dict[str, list[PersonDetection]] | None = None
+    person_detector_stats: PersonDetectorStats | None = None
     action_busy: bool = False
     manual_spin_active: bool = False
     camera_auto_stopped: bool = False
@@ -40,6 +43,8 @@ class SwarmDashboardRenderer:
         self.red = (231, 88, 88)
         self.blue = (88, 170, 255)
         self.motor_button_rect = (1086, 648, 1426, 698)
+        self.takeoff_button_rect = (0, 0, 0, 0)
+        self.land_button_rect = (0, 0, 0, 0)
 
     def render(self, states: list[DroneRuntimeState], view: DashboardViewState) -> np.ndarray:
         canvas = np.full((self.height, self.width, 3), self.bg, dtype=np.uint8)
@@ -56,17 +61,18 @@ class SwarmDashboardRenderer:
         if view.action_busy:
             motor = "BUSY"
         max_temp = max((state.temperature_high_c for state in states if state.temperature_high_c is not None), default=None)
-        temp_text = "temp=n/a" if max_temp is None else f"max temp={max_temp}C"
-        video_text = "video=OFF(heat)" if view.camera_auto_stopped else ("video=ON" if view.camera_enabled else "video=OFF")
-        cooling_text = "cooling=none" if not view.cooling_ips else "cooling=" + ",".join(ip.rsplit(".", 1)[-1] for ip in view.cooling_ips)
-        summary = f"{online}/{len(states)} online   {temp_text}   {video_text}   {cooling_text}   motor spin={motor}"
+        temp_text = "temp n/a" if max_temp is None else f"temp {max_temp}C"
+        video_text = "video heat-off" if view.camera_auto_stopped else ("video on" if view.camera_enabled else "video off")
+        cooling_text = "cool none" if not view.cooling_ips else "cool " + ",".join(ip.rsplit(".", 1)[-1] for ip in view.cooling_ips)
+        detector_text = self._detector_summary(view)
+        summary = f"{online}/{len(states)} | {temp_text} | {video_text} | {cooling_text} | {detector_text} | motor {motor.lower()}"
         cv2.putText(img, summary, (30, 72), cv2.FONT_HERSHEY_SIMPLEX, 0.58, self.muted, 1, cv2.LINE_AA)
 
         banner_color = self.green if "passed" in view.banner or view.banner == "idle" else self.yellow
         if "failed" in view.banner or "blocked" in view.banner or "timeout" in view.banner:
             banner_color = self.red
-        self._rounded_rect(img, (820, 20), (1450, 72), self.panel_alt, radius=14)
-        cv2.putText(img, view.banner[:68], (842, 54), cv2.FONT_HERSHEY_SIMPLEX, 0.55, banner_color, 1, cv2.LINE_AA)
+        self._rounded_rect(img, (980, 20), (1450, 72), self.panel_alt, radius=14)
+        cv2.putText(img, view.banner[:50], (1002, 54), cv2.FONT_HERSHEY_SIMPLEX, 0.55, banner_color, 1, cv2.LINE_AA)
 
     def _draw_cards(
         self,
@@ -114,6 +120,7 @@ class SwarmDashboardRenderer:
         cv2.putText(img, "Live Cameras", (x0 + 22, y0 + 34), cv2.FONT_HERSHEY_SIMPLEX, 0.76, self.text, 1, cv2.LINE_AA)
 
         frames = view.camera_frames or {}
+        detections_by_ip = view.person_detections or {}
         ips = sorted(frames)
         if not ips:
             cv2.putText(img, "no camera frames", (x0 + 30, y0 + h // 2), cv2.FONT_HERSHEY_SIMPLEX, 0.58, self.muted, 1, cv2.LINE_AA)
@@ -136,28 +143,110 @@ class SwarmDashboardRenderer:
             selected = ip == view.selected_ip
             border = self.blue if selected else (68, 76, 80)
             cv2.rectangle(img, (tx - 2, ty - 2), (tx + tile_w + 2, ty + tile_h + 2), border, 2)
-            frame = self._fit_frame(frames[ip], tile_w, tile_h)
+            source_frame = frames[ip]
+            frame = self._fit_frame(source_frame, tile_w, tile_h)
+            if detections_by_ip.get(ip):
+                self._draw_person_detections(frame, detections_by_ip[ip])
             img[ty : ty + tile_h, tx : tx + tile_w] = frame
             cv2.rectangle(img, (tx, ty), (tx + tile_w, ty + 24), (0, 0, 0), -1)
-            cv2.putText(img, ip, (tx + 8, ty + 17), cv2.FONT_HERSHEY_SIMPLEX, 0.45, self.text, 1, cv2.LINE_AA)
+            person_count = len(detections_by_ip.get(ip, []))
+            label = ip if person_count == 0 else f"{ip}  person x{person_count}"
+            cv2.putText(img, label, (tx + 8, ty + 17), cv2.FONT_HERSHEY_SIMPLEX, 0.45, self.text, 1, cv2.LINE_AA)
 
     def _draw_compact_footer(self, img: np.ndarray, view: DashboardViewState, x0: int, y0: int, w: int, h: int) -> None:
         self._rounded_rect(img, (x0, y0), (x0 + w, y0 + h), self.panel, radius=18)
-        enabled = True
-        bx1, by1 = x0 + w - 250, y0 + 9
-        bx2, by2 = x0 + w - 18, y0 + h - 9
-        self.motor_button_rect = (bx1, by1, bx2, by2)
-        button_fill = (55, 77, 65) if enabled else (58, 58, 58)
-        button_text = self.green if enabled else self.muted
-        self._rounded_rect(img, (bx1, by1), (bx2, by2), button_fill, radius=14)
-        label = "SPINNING..." if view.manual_spin_active else "MOTOR SPIN"
-        cv2.putText(img, label, (bx1 + 42, by1 + 28), cv2.FONT_HERSHEY_SIMPLEX, 0.62, button_text, 2, cv2.LINE_AA)
-        line = "S status   M spin props   V restart video   C select   Q quit"
+        button_w = 176
+        button_h = h - 18
+        gap = 12
+        by1 = y0 + 9
+        by2 = by1 + button_h
+        land_x1 = x0 + w - 18 - button_w
+        takeoff_x1 = land_x1 - gap - button_w
+        motor_x1 = takeoff_x1 - gap - button_w
+
+        self.motor_button_rect = (motor_x1, by1, motor_x1 + button_w, by2)
+        self.takeoff_button_rect = (takeoff_x1, by1, takeoff_x1 + button_w, by2)
+        self.land_button_rect = (land_x1, by1, land_x1 + button_w, by2)
+
+        motor_label = "SPINNING..." if view.manual_spin_active else "MOTOR SPIN"
+        self._draw_button(img, self.motor_button_rect, motor_label, (55, 77, 65), self.green)
+        self._draw_button(img, self.takeoff_button_rect, "TAKE OFF", (45, 65, 86), self.blue)
+        self._draw_button(img, self.land_button_rect, "LAND", (78, 58, 45), self.yellow)
+
+        line = "S status   M spin   T takeoff   L land   V video   C select   Q quit"
         cv2.putText(img, line, (x0 + 24, y0 + 34), cv2.FONT_HERSHEY_SIMPLEX, 0.55, self.text, 1, cv2.LINE_AA)
 
     def hit_test_motor_button(self, x: int, y: int) -> bool:
         x1, y1, x2, y2 = self.motor_button_rect
         return x1 <= x <= x2 and y1 <= y <= y2
+
+    def hit_test_takeoff_button(self, x: int, y: int) -> bool:
+        x1, y1, x2, y2 = self.takeoff_button_rect
+        return x1 <= x <= x2 and y1 <= y <= y2
+
+    def hit_test_land_button(self, x: int, y: int) -> bool:
+        x1, y1, x2, y2 = self.land_button_rect
+        return x1 <= x <= x2 and y1 <= y <= y2
+
+    def _draw_button(
+        self,
+        img: np.ndarray,
+        rect: tuple[int, int, int, int],
+        label: str,
+        fill: tuple[int, int, int],
+        text_color: tuple[int, int, int],
+    ) -> None:
+        x1, y1, x2, y2 = rect
+        self._rounded_rect(img, (x1, y1), (x2, y2), fill, radius=14)
+        (text_w, text_h), _baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.56, 2)
+        tx = x1 + max(8, (x2 - x1 - text_w) // 2)
+        ty = y1 + max(text_h + 6, (y2 - y1 + text_h) // 2)
+        cv2.putText(img, label, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, 0.56, text_color, 2, cv2.LINE_AA)
+
+    def _detector_summary(self, view: DashboardViewState) -> str:
+        stats = view.person_detector_stats
+        if stats is None:
+            return "person=off"
+        if stats.status == "error":
+            reason = stats.last_error.replace("detector unavailable: ", "").replace("detector error: ", "")
+            return f"person=error:{reason[:28]}"
+        if not stats.loaded:
+            return f"person={stats.status}"
+        last_ms = "n/a" if stats.last_inference_ms is None else f"{stats.last_inference_ms:.0f}ms"
+        hits = sum(len(value) for value in (view.person_detections or {}).values())
+        return f"people {hits} | infer {last_ms}"
+
+    def _draw_person_detections(self, frame: np.ndarray, detections: list[PersonDetection]) -> None:
+        for detection in detections:
+            source_h, source_w = detection.frame_shape
+            target_h, target_w = frame.shape[:2]
+            if source_h <= 0 or source_w <= 0 or target_h <= 0 or target_w <= 0:
+                continue
+            coords = np.asarray(detection.xyxy, dtype=np.float32).reshape(-1)
+            if coords.shape[0] != 4 or not np.all(np.isfinite(coords)):
+                continue
+            sx = target_w / max(1, source_w)
+            sy = target_h / max(1, source_h)
+            x1, y1, x2, y2 = (
+                int(round(float(coords[0]) * sx)),
+                int(round(float(coords[1]) * sy)),
+                int(round(float(coords[2]) * sx)),
+                int(round(float(coords[3]) * sy)),
+            )
+            x1 = int(np.clip(x1, 0, target_w - 1))
+            x2 = int(np.clip(x2, 0, target_w - 1))
+            y1 = int(np.clip(y1, 0, target_h - 1))
+            y2 = int(np.clip(y2, 0, target_h - 1))
+            if x2 <= x1 or y2 <= y1:
+                continue
+            cv2.rectangle(frame, (x1, y1), (x2, y2), self.green, 3)
+            label = f"person {detection.confidence:.2f}"
+            (text_w, text_h), _baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.56, 2)
+            label_y1 = max(0, y1 - text_h - 8)
+            label_y2 = min(frame.shape[0] - 1, label_y1 + text_h + 8)
+            label_x2 = min(frame.shape[1] - 1, x1 + text_w + 10)
+            cv2.rectangle(frame, (x1, label_y1), (label_x2, label_y2), (0, 0, 0), -1)
+            cv2.putText(frame, label, (x1 + 5, label_y2 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.56, self.green, 2, cv2.LINE_AA)
 
     @staticmethod
     def _fit_frame(frame: np.ndarray, width: int, height: int) -> np.ndarray:

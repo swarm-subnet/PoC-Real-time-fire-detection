@@ -21,7 +21,7 @@ import cv2
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 SRC_DIR = ROOT_DIR / "src"
-DEFAULT_IP_FILE = ROOT_DIR / "scripts" / "swarm" / "drone_ips.txt"
+DEFAULT_IP_FILE = ROOT_DIR / "scripts" / "swarm" / "config" / "drone_ips.txt"
 DEFAULT_IMAGE_OUTPUT_DIR = ROOT_DIR / "captures" / "depth_images"
 DEFAULT_FOLDER_OUTPUT_DIR = ROOT_DIR / "captures" / "depth_folder"
 DEFAULT_LIVE_SAVE_DIR = ROOT_DIR / "captures" / "depth_live"
@@ -117,7 +117,7 @@ def parse_args() -> argparse.Namespace:
     live_parser.add_argument(
         "--ip",
         action="append",
-        help="Drone IP to try. Can be passed multiple times. If omitted, uses scripts/swarm/drone_ips.txt.",
+        help="Drone IP to try. Can be passed multiple times. If omitted, uses scripts/swarm/config/drone_ips.txt.",
     )
     live_parser.add_argument(
         "--ip-file",

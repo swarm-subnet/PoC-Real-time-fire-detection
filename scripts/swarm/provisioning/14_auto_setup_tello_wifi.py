@@ -18,7 +18,7 @@ import sys
 import time
 
 
-ROOT_DIR = Path(__file__).resolve().parents[2]
+ROOT_DIR = Path(__file__).resolve().parents[3]
 SRC_DIR = ROOT_DIR / "src"
 DEFAULT_REBOOT_WAIT_SECONDS = 25
 DEFAULT_SCAN_SECONDS = 75

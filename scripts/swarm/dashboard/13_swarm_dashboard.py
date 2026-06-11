@@ -14,17 +14,21 @@ try:
 except ModuleNotFoundError as error:
     print("Missing Python package: cv2")
     print("Run this dashboard with the project Windows venv:")
-    print(r"  .\venv-win\Scripts\python.exe scripts\swarm\13_swarm_dashboard.py")
+    print(r"  .\venv-win\Scripts\python.exe scripts\swarm\dashboard\13_swarm_dashboard.py")
     raise SystemExit(1) from error
 
 
-ROOT_DIR = Path(__file__).resolve().parents[2]
+ROOT_DIR = Path(__file__).resolve().parents[3]
 SRC_DIR = ROOT_DIR / "src"
 
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from swarm_dashboard_app import (  # noqa: E402
+    DEFAULT_FLIGHT_MIN_BATTERY_PERCENT,
+    DEFAULT_PERSON_CONFIDENCE,
+    DEFAULT_PERSON_IMGSZ,
+    DEFAULT_PERSON_MODEL,
     DEFAULT_THERMAL_COOLING_START_C,
     DEFAULT_THERMAL_COOLING_STOP_C,
     DEFAULT_LOCAL_VIDEO_PORT,
@@ -38,11 +42,11 @@ from swarm_utils import DEFAULT_DRONE_IPS_FILE, load_registered_ips, unique_ips 
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Visual dashboard and motor-spin bench test runner for a Tello swarm.")
+    parser = argparse.ArgumentParser(description="Visual dashboard with guarded bench controls for a Tello swarm.")
     parser.add_argument(
         "ips",
         nargs="*",
-        help="Drone IP address(es). If omitted, uses scripts/swarm/drone_ips.txt.",
+        help="Drone IP address(es). If omitted, uses scripts/swarm/config/drone_ips.txt.",
     )
     parser.add_argument(
         "--status-retries",
@@ -57,9 +61,32 @@ def parse_args() -> argparse.Namespace:
         help="Seconds to spin props after the last M/button press. Default: 2.0.",
     )
     parser.add_argument(
+        "--flight-min-battery",
+        type=int,
+        default=DEFAULT_FLIGHT_MIN_BATTERY_PERCENT,
+        help=f"Minimum battery required for dashboard takeoff. Default: {DEFAULT_FLIGHT_MIN_BATTERY_PERCENT}.",
+    )
+    parser.add_argument(
         "--no-camera-wall",
         action="store_true",
         help="Disable live video streams if you only want status/control.",
+    )
+    parser.add_argument(
+        "--person-model",
+        default=DEFAULT_PERSON_MODEL,
+        help=f"Ultralytics YOLO model for person detection. Default: {DEFAULT_PERSON_MODEL}.",
+    )
+    parser.add_argument(
+        "--person-imgsz",
+        type=int,
+        default=DEFAULT_PERSON_IMGSZ,
+        help=f"Detector inference image size. Default: {DEFAULT_PERSON_IMGSZ}. Use 416 only if you need more speed.",
+    )
+    parser.add_argument(
+        "--person-conf",
+        type=float,
+        default=DEFAULT_PERSON_CONFIDENCE,
+        help=f"Minimum person confidence. Default: {DEFAULT_PERSON_CONFIDENCE}.",
     )
     parser.add_argument(
         "--video-port-start",
@@ -115,6 +142,12 @@ def main() -> None:
         raise ValueError("--status-retries must be greater than 0")
     if args.motor_spin_seconds <= 0:
         raise ValueError("--motor-spin-seconds must be greater than 0")
+    if args.flight_min_battery < 0:
+        raise ValueError("--flight-min-battery must be 0 or greater")
+    if args.person_imgsz <= 0:
+        raise ValueError("--person-imgsz must be greater than 0")
+    if not (0.0 < args.person_conf <= 1.0):
+        raise ValueError("--person-conf must be in (0, 1]")
     if args.video_port_start < 1025:
         raise ValueError("--video-port-start must be >= 1025")
     if args.thermal_warning_c <= 0:
@@ -152,10 +185,18 @@ def main() -> None:
         thermal_cooling_stop_c=args.thermal_cooling_stop_c,
         thermal_video_stop_c=args.thermal_video_stop_c,
         auto_stop_video_on_heat=not args.no_thermal_video_stop,
+        flight_min_battery=args.flight_min_battery,
+        person_model_name=args.person_model,
+        person_imgsz=args.person_imgsz,
+        person_confidence=args.person_conf,
     )
     app = DashboardApp(config)
-    print(f"Loaded {len(ips)} drone(s): {', '.join(ips)}")
-    app.run()
+    print(f"Loaded {len(ips)} drone(s): {', '.join(ips)}", flush=True)
+    try:
+        app.run()
+    except RuntimeError as error:
+        print(f"Dashboard startup failed: {error}", file=sys.stderr)
+        raise SystemExit(1) from error
 
 
 if __name__ == "__main__":

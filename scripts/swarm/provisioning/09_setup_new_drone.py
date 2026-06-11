@@ -11,12 +11,12 @@ import sys
 import time
 
 
-ROOT_DIR = Path(__file__).resolve().parents[2]
+ROOT_DIR = Path(__file__).resolve().parents[3]
 SRC_DIR = ROOT_DIR / "src"
 DEFAULT_TELLO_AP_IP = "192.168.10.1"
 TELLO_PORT = 8889
 COMMAND_TIMEOUT_SECONDS = 7
-DRONE_IPS_FILE = Path(__file__).with_name("drone_ips.txt")
+DRONE_IPS_FILE = ROOT_DIR / "scripts" / "swarm" / "config" / "drone_ips.txt"
 
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
@@ -28,7 +28,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Connect Windows to one new drone's TELLO-* Wi-Fi first. This script sends the ap command, "
-            "waits for reboot, scans the router network, and appends detected IPs to drone_ips.txt."
+            "waits for reboot, scans the router network, and appends detected IPs to config/drone_ips.txt."
         )
     )
     parser.add_argument(

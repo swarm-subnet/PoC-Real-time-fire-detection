@@ -13,7 +13,8 @@ MIN_BATTERY_PERCENT = 20
 TELLO_PORT = 8889
 COMMAND_TIMEOUT_SECONDS = 7
 COMMAND_RETRIES = 3
-DRONE_IPS_FILE = Path(__file__).with_name("drone_ips.txt")
+ROOT_DIR = Path(__file__).resolve().parents[3]
+DRONE_IPS_FILE = ROOT_DIR / "scripts" / "swarm" / "config" / "drone_ips.txt"
 
 
 def parse_args() -> argparse.Namespace:
@@ -21,7 +22,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "ip",
         nargs="?",
-        help="Drone IP address on your router/hotspot. If omitted, uses scripts/swarm/drone_ips.txt.",
+        help="Drone IP address on your router/hotspot. If omitted, uses scripts/swarm/config/drone_ips.txt.",
     )
     return parser.parse_args()
 
@@ -202,7 +203,7 @@ def main() -> None:
 
     if not ips:
         print(f"No drone IP provided and no registered drones found in {DRONE_IPS_FILE}.")
-        print("Run scripts/swarm/09_setup_new_drone.py first, or pass an IP explicitly.")
+        print("Run scripts/swarm/provisioning/09_setup_new_drone.py first, or pass an IP explicitly.")
         return
 
     sock = create_sdk_socket()

@@ -116,6 +116,7 @@ def open_udp_capture(port: int) -> cv2.VideoCapture | None:
     for url in urls:
         cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
         if cap.isOpened():
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
             return cap
         cap.release()
     return None

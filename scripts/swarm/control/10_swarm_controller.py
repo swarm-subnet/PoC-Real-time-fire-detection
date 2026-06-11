@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 from dataclasses import dataclass
 from pathlib import Path
 import shlex
@@ -9,7 +10,7 @@ import sys
 import time
 
 
-ROOT_DIR = Path(__file__).resolve().parents[2]
+ROOT_DIR = Path(__file__).resolve().parents[3]
 SRC_DIR = ROOT_DIR / "src"
 MIN_FLIGHT_BATTERY_PERCENT = 30
 DEFAULT_SPIN_SECONDS = 3
@@ -163,6 +164,16 @@ def print_status_table(statuses: list[DroneStatus]) -> None:
     print("")
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Legacy interactive station-mode Tello swarm controller.")
+    parser.add_argument(
+        "ips",
+        nargs="*",
+        help="Drone IP address(es). If omitted, uses scripts/swarm/config/drone_ips.txt.",
+    )
+    return parser.parse_args()
+
+
 def print_help() -> None:
     print(
         """
@@ -240,10 +251,11 @@ def run_repl(controller: SwarmFlightController) -> None:
 
 
 def main() -> None:
-    ips = load_registered_ips()
+    args = parse_args()
+    ips = args.ips or load_registered_ips()
     if not ips:
         print(f"No registered drones found in {DEFAULT_DRONE_IPS_FILE}.")
-        print("Run scripts/swarm/09_setup_new_drone.py for each drone first.")
+        print("Run scripts/swarm/provisioning/09_setup_new_drone.py for each drone first.")
         return
 
     controller = SwarmFlightController(ips)

@@ -15,7 +15,7 @@ import sys
 import time
 
 
-ROOT_DIR = Path(__file__).resolve().parents[2]
+ROOT_DIR = Path(__file__).resolve().parents[3]
 SRC_DIR = ROOT_DIR / "src"
 COMMAND_TIMEOUT_SECONDS = 10
 COMMAND_RETRIES = 3
@@ -52,7 +52,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "ips",
         nargs="*",
-        help="Drone IP address(es). If omitted, uses every IP from scripts/swarm/drone_ips.txt.",
+        help="Drone IP address(es). If omitted, uses every IP from scripts/swarm/config/drone_ips.txt.",
     )
     parser.add_argument(
         "--hover-seconds",

@@ -2,7 +2,7 @@
 
 The script keeps drones on the ground, optionally spins the propellers with
 ``motoron``, and logs timestamped battery readings. It can test one drone, a
-subset of drones, or every IP in ``scripts/swarm/drone_ips.txt``.
+subset of drones, or every IP in ``scripts/swarm/config/drone_ips.txt``.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ import sys
 import time
 
 
-ROOT_DIR = Path(__file__).resolve().parents[2]
+ROOT_DIR = Path(__file__).resolve().parents[3]
 SRC_DIR = ROOT_DIR / "src"
 COMMAND_TIMEOUT_SECONDS = 5
 COMMAND_RETRIES = 3
@@ -59,7 +59,7 @@ def parse_args() -> argparse.Namespace:
         nargs="*",
         help=(
             "Drone IP address(es). If omitted, uses every IP from "
-            "scripts/swarm/drone_ips.txt."
+            "scripts/swarm/config/drone_ips.txt."
         ),
     )
     parser.add_argument(

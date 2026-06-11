@@ -175,5 +175,5 @@ netsh wlan delete profile name="TELLO-XXXXXX"
 See also:
 
 - `tello.md` for RoboMaster TT / Tello SDK command and networking reference.
-- `scripts/swarm/09_setup_new_drone.py` for one-drone manual station-mode setup.
-- `scripts/swarm/14_auto_setup_tello_wifi.py` for serial station-mode setup.
+- `scripts/swarm/provisioning/09_setup_new_drone.py` for one-drone manual station-mode setup.
+- `scripts/swarm/provisioning/14_auto_setup_tello_wifi.py` for serial station-mode setup.

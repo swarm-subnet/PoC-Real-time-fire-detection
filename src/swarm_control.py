@@ -83,6 +83,41 @@ class SwarmController:
             return False
         return True
 
+    def check_all_ready(
+        self,
+        retries: int = 2,
+        min_battery: int | None = None,
+        status: StatusCallback | None = None,
+    ) -> bool:
+        """Require every configured drone to answer before a swarm action starts.
+
+        This intentionally checks connectivity and optional battery only. Thermal
+        state is monitored by the dashboard, but it is not a flight-command gate.
+        """
+        self._set_action("ready_check")
+        failures: list[str] = []
+        try:
+            for ip in self.ips:
+                passed = self.refresh_one(ip, retries=retries)
+                state = self.states[ip]
+                battery = state.battery
+                if not passed:
+                    failures.append(f"{ip}: offline")
+                elif min_battery is not None and battery is None:
+                    failures.append(f"{ip}: no battery")
+                elif min_battery is not None and battery < min_battery:
+                    failures.append(f"{ip}: {battery}% < {min_battery}%")
+
+            if failures:
+                if status:
+                    status("ready check failed: " + "; ".join(failures))
+                return False
+            if status:
+                status("ready check passed")
+            return True
+        finally:
+            self._set_action("idle")
+
     def refresh_one(self, ip: str, retries: int = 1) -> bool:
         with self.lock:
             self._update_state(ip, command_state="checking", last_command="battery?")
@@ -352,16 +387,18 @@ class SwarmController:
                     seen=response is not None,
                 )
         if status:
+            label = "cooling motoron" if command_state == "cooling" else "motoron"
             if ok_ips:
-                status("cooling motoron: " + ", ".join(ok_ips))
+                status(f"{label}: " + ", ".join(ok_ips))
             if failed:
-                status("cooling motoron failed: " + ", ".join(failed))
+                status(f"{label} failed: " + ", ".join(failed))
         return ok_ips
 
     def motoroff_ips(
         self,
         ips: list[str],
         status: StatusCallback | None = None,
+        status_label: str = "motoroff",
     ) -> list[str]:
         selected = [ip for ip in ips if ip in self.states]
         if not selected:
@@ -390,9 +427,9 @@ class SwarmController:
                 )
         if status:
             if ok_ips:
-                status("cooling motoroff: " + ", ".join(ok_ips))
+                status(f"{status_label}: " + ", ".join(ok_ips))
             if failed:
-                status("cooling motoroff failed: " + ", ".join(failed))
+                status(f"{status_label} failed: " + ", ".join(failed))
         return ok_ips
 
     def emergency_all(self, status: StatusCallback | None = None) -> None:
