@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import SimpleNamespace
 from pathlib import Path
 import sys
 import time
@@ -128,6 +129,16 @@ class FakeDetector:
                 )
             ]
         }
+
+    def snapshot_stats(self):
+        return SimpleNamespace(
+            loaded=True,
+            status="ready:mock",
+            last_error="",
+            last_inference_ms=1.0,
+            total_batches=self.calls,
+            overall_fps=30.0,
+        )
 
 
 class KeyedPreviewApp(SingleDroneSearchPreviewApp):

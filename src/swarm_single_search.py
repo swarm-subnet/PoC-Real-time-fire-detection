@@ -34,7 +34,10 @@ class SingleDroneSearchConfig:
     min_confidence: float = 0.2
     preview_enabled: bool = True
     preview_window_name: str = "Single Drone Person Search"
+    preview_width: int = 1280
+    preview_height: int = 820
     detection_hold_seconds: float = 1.5
+    detector_ready_timeout_seconds: float = 60.0
 
 
 @dataclass(frozen=True)
@@ -172,15 +175,35 @@ class SingleDroneSearchRunner:
             return None
         if not self._preview_window_created:
             cv2.namedWindow(self.config.preview_window_name, cv2.WINDOW_NORMAL)
-            cv2.resizeWindow(self.config.preview_window_name, 960, 720)
+            cv2.resizeWindow(self.config.preview_window_name, self.config.preview_width, self.config.preview_height)
             self._preview_window_created = True
 
-        canvas = frame.copy()
-        self._draw_detections(canvas, detections)
-        self._draw_status(canvas)
+        canvas = self._build_preview_canvas(frame, detections)
         cv2.imshow(self.config.preview_window_name, canvas)
         key = cv2.waitKey(1) & 0xFF
         return None if key == 255 else key
+
+    def _build_preview_canvas(self, frame: np.ndarray, detections: list[DetectionLike]) -> np.ndarray:
+        width = self.config.preview_width
+        height = self.config.preview_height
+        canvas = np.full((height, width, 3), (17, 20, 23), dtype=np.uint8)
+        cv2.putText(canvas, "Single Drone Person Search", (28, 42), cv2.FONT_HERSHEY_SIMPLEX, 1.05, (238, 244, 240), 2, cv2.LINE_AA)
+        cv2.putText(canvas, self._detector_status_text(), (30, 74), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (155, 166, 166), 1, cv2.LINE_AA)
+
+        panel_x, panel_y = 28, 98
+        panel_w, panel_h = width - 56, height - 190
+        cv2.rectangle(canvas, (panel_x - 2, panel_y - 2), (panel_x + panel_w + 2, panel_y + panel_h + 2), (68, 76, 80), 2)
+        fitted = self._fit_frame(frame, panel_w, panel_h)
+        self._draw_detections(fitted, detections)
+        canvas[panel_y : panel_y + panel_h, panel_x : panel_x + panel_w] = fitted
+
+        cv2.rectangle(canvas, (panel_x, panel_y), (panel_x + panel_w, panel_y + 30), (0, 0, 0), -1)
+        person_count = len(detections)
+        label = self.ip if person_count == 0 else f"{self.ip}  person x{person_count}"
+        cv2.putText(canvas, label, (panel_x + 12, panel_y + 21), cv2.FONT_HERSHEY_SIMPLEX, 0.56, (238, 244, 240), 1, cv2.LINE_AA)
+
+        self._draw_status(canvas)
+        return canvas
 
     def _hold_detection_preview(self, frame: np.ndarray | None, detections: list[DetectionLike]) -> None:
         if not self.config.preview_enabled or self.config.detection_hold_seconds <= 0:
@@ -195,11 +218,12 @@ class SingleDroneSearchRunner:
     def _draw_status(self, frame: np.ndarray) -> None:
         height, width = frame.shape[:2]
         overlay_h = 58
-        cv2.rectangle(frame, (0, 0), (width, overlay_h), (0, 0, 0), -1)
+        footer_y = max(0, height - overlay_h - 16)
+        cv2.rectangle(frame, (24, footer_y), (width - 24, height - 20), (30, 35, 39), -1)
         cv2.putText(
             frame,
             f"{self.ip} | {self._last_status_message[:80]}",
-            (14, 24),
+            (42, footer_y + 24),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.62,
             (80, 230, 120),
@@ -209,14 +233,23 @@ class SingleDroneSearchRunner:
         cv2.putText(
             frame,
             "P preflight | G start search | L land | Q/Esc quit-land | no forward/sideways",
-            (14, 48),
+            (42, footer_y + 48),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.50,
             (230, 235, 230),
             1,
             cv2.LINE_AA,
         )
-        cv2.line(frame, (width // 2, overlay_h), (width // 2, height), (80, 160, 255), 1)
+        cv2.line(frame, (width // 2, 98), (width // 2, footer_y - 12), (80, 160, 255), 1)
+
+    def _detector_status_text(self) -> str:
+        stats = self.detector.snapshot_stats()
+        if stats.status == "error":
+            return f"detector=error:{stats.last_error[:80]}"
+        if not stats.loaded:
+            return f"detector={stats.status}; video should already be live"
+        last_ms = "n/a" if stats.last_inference_ms is None else f"{stats.last_inference_ms:.0f}ms"
+        return f"detector=ready infer={last_ms} batches={stats.total_batches} fps={stats.overall_fps:.1f}"
 
     @staticmethod
     def _draw_detections(frame: np.ndarray, detections: list[DetectionLike]) -> None:
@@ -248,6 +281,12 @@ class SingleDroneSearchRunner:
             label = f"person {confidence:.2f}"
             cv2.rectangle(frame, (x1, max(0, y1 - 28)), (min(target_w - 1, x1 + 130), y1), (0, 0, 0), -1)
             cv2.putText(frame, label, (x1 + 5, max(18, y1 - 7)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (80, 230, 120), 2, cv2.LINE_AA)
+
+    @staticmethod
+    def _fit_frame(frame: np.ndarray, width: int, height: int) -> np.ndarray:
+        if frame.ndim == 2:
+            frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+        return cv2.resize(frame, (width, height), interpolation=cv2.INTER_AREA)
 
     def _close_preview(self) -> None:
         if not self._preview_window_created:
@@ -299,13 +338,10 @@ class SingleDroneSearchPreviewApp(SingleDroneSearchRunner):
     def run(self, status: StatusCallback | None = None) -> SingleDroneSearchResult:
         result = SingleDroneSearchResult(False, False, "quit before autonomous run")
         try:
-            self._status(status, "loading GPU person detector")
-            self.detector.ensure_ready()
-
             self._status(status, "starting live preview")
             self.camera.start()
             self.detector.start()
-            self._status(status, "preview ready: verify boxes, press G to fly")
+            self._status(status, "preview ready; detector loading in background")
 
             while not self._stop_event.is_set():
                 snapshot = self.camera.get_snapshot(copy=False)
@@ -382,6 +418,8 @@ class SingleDroneSearchPreviewApp(SingleDroneSearchRunner):
         )
 
     def _autonomous_run(self, status: StatusCallback | None) -> SingleDroneSearchResult:
+        if not self._wait_for_detector_ready(status):
+            return SingleDroneSearchResult(False, False, "detector not ready")
         if self.controller.any_airborne():
             self._status(status, "already airborne; starting yaw search")
         elif not self._preflight(status):
@@ -402,6 +440,24 @@ class SingleDroneSearchPreviewApp(SingleDroneSearchRunner):
         self._status(status, f"autonomous complete: {final_result.reason}")
         self._stop_event.set()
         return final_result
+
+    def _wait_for_detector_ready(self, status: StatusCallback | None) -> bool:
+        deadline = time.monotonic() + self.config.detector_ready_timeout_seconds
+        last_status = ""
+        while time.monotonic() < deadline and not self._stop_event.is_set():
+            stats = self.detector.snapshot_stats()
+            if stats.loaded:
+                return True
+            if stats.status == "error":
+                self._status(status, f"search blocked: {stats.last_error}")
+                return False
+            status_text = f"waiting for detector before takeoff: {stats.status}"
+            if status_text != last_status:
+                self._status(status, status_text)
+                last_status = status_text
+            time.sleep(0.1)
+        self._status(status, "search blocked: detector did not become ready")
+        return False
 
     def _search_from_preview_detector(self, status: StatusCallback | None) -> SingleDroneSearchResult:
         started = time.monotonic()
