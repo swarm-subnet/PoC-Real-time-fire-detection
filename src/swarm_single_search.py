@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import threading
 import time
 from typing import Callable
 
@@ -161,10 +162,14 @@ class SingleDroneSearchRunner:
         return SingleDroneSearchResult(False, False, "search timed out")
 
     def _show_preview(self, frame: np.ndarray | None, detections: list[DetectionLike]) -> bool:
+        key = self._render_preview(frame, detections)
+        return key not in (27, ord("q"), ord("Q"))
+
+    def _render_preview(self, frame: np.ndarray | None, detections: list[DetectionLike]) -> int | None:
         if not self.config.preview_enabled:
-            return True
+            return None
         if frame is None:
-            return True
+            return None
         if not self._preview_window_created:
             cv2.namedWindow(self.config.preview_window_name, cv2.WINDOW_NORMAL)
             cv2.resizeWindow(self.config.preview_window_name, 960, 720)
@@ -175,10 +180,7 @@ class SingleDroneSearchRunner:
         self._draw_status(canvas)
         cv2.imshow(self.config.preview_window_name, canvas)
         key = cv2.waitKey(1) & 0xFF
-        if key in (27, ord("q"), ord("Q")):
-            self._last_status_message = "operator abort; landing"
-            return False
-        return True
+        return None if key == 255 else key
 
     def _hold_detection_preview(self, frame: np.ndarray | None, detections: list[DetectionLike]) -> None:
         if not self.config.preview_enabled or self.config.detection_hold_seconds <= 0:
@@ -206,7 +208,7 @@ class SingleDroneSearchRunner:
         )
         cv2.putText(
             frame,
-            "Q/Esc abort-land | no forward/sideways commands",
+            "P preflight | G start search | L land | Q/Esc quit-land | no forward/sideways",
             (14, 48),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.50,
@@ -274,3 +276,183 @@ class SingleDroneSearchRunner:
         self._last_status_message = message
         if status is not None:
             status(message)
+
+
+class SingleDroneSearchPreviewApp(SingleDroneSearchRunner):
+    """Preview-first one-drone app: video/detection first, flight only after G."""
+
+    def __init__(
+        self,
+        ip: str,
+        detector_config: PersonDetectorConfig,
+        config: SingleDroneSearchConfig | None = None,
+        controller: SwarmController | None = None,
+        camera: SwarmCameraWall | None = None,
+        detector: SwarmPersonDetector | None = None,
+    ) -> None:
+        super().__init__(ip, detector_config, config, controller, camera, detector)
+        self._stop_event = threading.Event()
+        self._action_lock = threading.RLock()
+        self._action_thread: threading.Thread | None = None
+        self._last_action_result: SingleDroneSearchResult | None = None
+
+    def run(self, status: StatusCallback | None = None) -> SingleDroneSearchResult:
+        result = SingleDroneSearchResult(False, False, "quit before autonomous run")
+        try:
+            self._status(status, "loading GPU person detector")
+            self.detector.ensure_ready()
+
+            self._status(status, "starting live preview")
+            self.camera.start()
+            self.detector.start()
+            self._status(status, "preview ready: verify boxes, press G to fly")
+
+            while not self._stop_event.is_set():
+                snapshot = self.camera.get_snapshot(copy=False)
+                self.detector.update_frames(snapshot.frames, snapshot.frame_versions)
+                detections = self.detector.get_detections()
+                key = self._render_preview(snapshot.frames.get(self.ip), detections.get(self.ip, []))
+                if key is not None:
+                    self._handle_preview_key(key, status)
+
+                thread = self._action_thread
+                if thread is not None and not thread.is_alive():
+                    thread.join(timeout=0)
+                    self._action_thread = None
+                time.sleep(0.01)
+
+            self._wait_for_action(timeout=10)
+            if self._last_action_result is not None:
+                return self._last_action_result
+            if self.controller.any_airborne():
+                landed = self._land(status)
+                return SingleDroneSearchResult(False, landed, "operator quit")
+            return result
+        except KeyboardInterrupt:
+            self._status(status, "interrupted; landing")
+            landed = self._land(status)
+            return SingleDroneSearchResult(False, landed, "interrupted")
+        finally:
+            self._stop_event.set()
+            self._wait_for_action(timeout=10)
+            if self.controller.any_airborne():
+                self._land(status)
+            self.detector.stop()
+            self.camera.stop()
+            self._close_preview()
+            self.controller.close()
+
+    def _handle_preview_key(self, key: int, status: StatusCallback | None) -> None:
+        char = chr(key).lower() if 0 <= key < 256 else ""
+        if key == 27 or char == "q":
+            self._status(status, "quit requested; landing if airborne")
+            self._stop_event.set()
+        elif char == "p":
+            self._start_action("preflight", lambda: self._preflight(status), status)
+        elif char == "g":
+            self._start_action("autonomous search", lambda: self._autonomous_run(status), status)
+        elif char == "l":
+            self._status(status, "land requested")
+            self._stop_event.set()
+            self._start_action("land", lambda: self._land(status), status)
+
+    def _start_action(self, name: str, target: Callable[[], object], status: StatusCallback | None) -> None:
+        with self._action_lock:
+            if self._action_thread is not None and self._action_thread.is_alive():
+                self._status(status, f"{name} ignored: action already running")
+                return
+
+            def run_action() -> None:
+                try:
+                    self._status(status, f"{name} started")
+                    action_result = target()
+                    if isinstance(action_result, SingleDroneSearchResult):
+                        self._last_action_result = action_result
+                except Exception as error:
+                    self._status(status, f"{name} failed: {error}")
+
+            self._action_thread = threading.Thread(target=run_action, daemon=True)
+            self._action_thread.start()
+
+    def _preflight(self, status: StatusCallback | None) -> bool:
+        return self.controller.check_all_ready(
+            retries=self.config.status_retries,
+            min_battery=self.config.min_battery,
+            status=status,
+        )
+
+    def _autonomous_run(self, status: StatusCallback | None) -> SingleDroneSearchResult:
+        if self.controller.any_airborne():
+            self._status(status, "already airborne; starting yaw search")
+        elif not self._preflight(status):
+            return SingleDroneSearchResult(False, False, "preflight failed")
+        else:
+            self._status(status, "takeoff")
+            if not self.controller.takeoff_sequential(
+                settle_seconds=self.config.takeoff_settle_seconds,
+                status=status,
+            ):
+                landed = self._land(status)
+                return SingleDroneSearchResult(False, landed, "takeoff failed")
+
+        self._reset_detection_history()
+        result = self._search_from_preview_detector(status)
+        landed = self._land(status)
+        final_result = SingleDroneSearchResult(result.detected, landed, result.reason, result.candidate)
+        self._status(status, f"autonomous complete: {final_result.reason}")
+        self._stop_event.set()
+        return final_result
+
+    def _search_from_preview_detector(self, status: StatusCallback | None) -> SingleDroneSearchResult:
+        started = time.monotonic()
+        next_yaw_at = started
+        deadline = started + self.config.max_search_seconds
+        self._status(status, "stationary yaw search started")
+
+        while time.monotonic() < deadline and not self._stop_event.is_set():
+            now = time.monotonic()
+            detections = self.detector.get_detections()
+            self.aggregator.update(detections, now=now)
+            candidate = self.aggregator.best_confirmed_candidate(now=now)
+            if candidate is not None:
+                self._status(
+                    status,
+                    f"PERSON DETECTED by {self.ip}: conf={candidate.latest_confidence:.2f} "
+                    f"center_error={candidate.center_error_ratio:.2f}; landing",
+                )
+                self._send_mission_command(MissionCommand(self.ip, "stop", "person detected"), status)
+                return SingleDroneSearchResult(True, False, "person detected", candidate)
+
+            if now >= next_yaw_at:
+                self._send_mission_command(
+                    MissionCommand(self.ip, f"cw {self.config.yaw_step_degrees}", "stationary search yaw"),
+                    status,
+                )
+                next_yaw_at = now + self.config.yaw_interval_seconds
+            time.sleep(0.03)
+
+        if self._stop_event.is_set():
+            self._send_mission_command(MissionCommand(self.ip, "stop", "operator stop"), status)
+            return SingleDroneSearchResult(False, False, "operator stop")
+
+        self._status(status, "search timed out; landing")
+        self._send_mission_command(MissionCommand(self.ip, "stop", "search timeout"), status)
+        return SingleDroneSearchResult(False, False, "search timed out")
+
+    def _reset_detection_history(self) -> None:
+        self.aggregator = DetectionAggregator(
+            [self.ip],
+            SearchMissionConfig(
+                confirmation_detections=self.config.confirmation_detections,
+                confirmation_window_seconds=self.config.confirmation_window_seconds,
+                max_detection_age_seconds=self.config.max_detection_age_seconds,
+                min_confidence=self.config.min_confidence,
+                yaw_step_degrees=self.config.yaw_step_degrees,
+                yaw_interval_seconds=self.config.yaw_interval_seconds,
+            ),
+        )
+
+    def _wait_for_action(self, timeout: float) -> None:
+        thread = self._action_thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=timeout)

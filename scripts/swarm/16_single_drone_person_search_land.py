@@ -1,7 +1,9 @@
-"""One-drone stationary person-search validation run.
+"""Preview-first one-drone stationary person-search validation run.
 
-The drone takes off, yaws in place until a person is repeatedly detected, prints
-the detection event, then lands. It never moves forward or sideways.
+The script connects to the first reachable drone, starts video + person
+detection, and waits for the operator. Press G to take off, yaw-search in place
+until a person is repeatedly detected, then land. It never moves forward or
+sideways.
 """
 
 from __future__ import annotations
@@ -26,13 +28,23 @@ from swarm_detector import (  # noqa: E402
     DEFAULT_PERSON_MODEL,
     PersonDetectorConfig,
 )
-from swarm_single_search import SingleDroneSearchConfig, SingleDroneSearchRunner  # noqa: E402
-from swarm_utils import DEFAULT_DRONE_IPS_FILE, TelloUdpClient, load_registered_ips, query_battery, timestamp  # noqa: E402
+from swarm_single_search import (  # noqa: E402
+    SingleDroneSearchConfig,
+    SingleDroneSearchPreviewApp,
+    SingleDroneSearchRunner,
+)
+from swarm_utils import (  # noqa: E402
+    DEFAULT_DRONE_IPS_FILE,
+    TelloUdpClient,
+    load_registered_ips,
+    query_battery,
+    timestamp,
+)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Take off one Tello, yaw-search for a person, print detection, then land."
+        description="Open one Tello live preview, then press G to yaw-search for a person and land."
     )
     parser.add_argument(
         "ip",
@@ -49,7 +61,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--takeoff-settle", type=float, default=3.0, help="Seconds to settle after takeoff. Default: 3.")
     parser.add_argument("--confirm-detections", type=int, default=5, help="Detections required before landing. Default: 5.")
     parser.add_argument("--confirm-window", type=float, default=3.0, help="Confirmation window in seconds. Default: 3.")
-    parser.add_argument("--no-preview", action="store_true", help="Disable the live video preview window.")
+    parser.add_argument("--no-preview", action="store_true", help="Disable preview and run the old immediate takeoff/search/land flow.")
     parser.add_argument("--detection-hold", type=float, default=1.5, help="Seconds to keep the detection box visible before landing. Default: 1.5.")
     parser.add_argument("--person-model", default=DEFAULT_PERSON_MODEL, help=f"YOLO model. Default: {DEFAULT_PERSON_MODEL}.")
     parser.add_argument("--person-imgsz", type=int, default=DEFAULT_PERSON_IMGSZ, help=f"Inference image size. Default: {DEFAULT_PERSON_IMGSZ}.")
@@ -82,12 +94,15 @@ def main() -> None:
     )
 
     print(f"[{timestamp()}] Single-drone person search: {ip}", flush=True)
-    print("Expected behavior: takeoff -> yaw in place -> person detected -> land.", flush=True)
+    print("Expected behavior: live preview first; press G for takeoff -> yaw in place -> person detected -> land.", flush=True)
     print("No forward/sideways movement is sent by this script.", flush=True)
     if not args.no_preview:
-        print("Live preview enabled: bounding boxes are drawn; press Q/Esc to abort-land.", flush=True)
+        print("Live preview enabled: P=preflight, G=start search, L=land, Q/Esc=quit-land.", flush=True)
+    else:
+        print("Preview disabled: running immediate takeoff/search/land flow.", flush=True)
 
-    runner = SingleDroneSearchRunner(ip, detector_config, config)
+    runner_cls = SingleDroneSearchRunner if args.no_preview else SingleDroneSearchPreviewApp
+    runner = runner_cls(ip, detector_config, config)
     result = runner.run(status=lambda message: print(f"[{timestamp()}] {message}", flush=True))
     outcome = "DETECTED" if result.detected else "NOT DETECTED"
     print(f"[{timestamp()}] Result: {outcome}; landed={result.landed}; reason={result.reason}", flush=True)

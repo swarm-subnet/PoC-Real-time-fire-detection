@@ -15,7 +15,11 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from swarm_detector import PersonDetectorConfig  # noqa: E402
-from swarm_single_search import SingleDroneSearchConfig, SingleDroneSearchRunner  # noqa: E402
+from swarm_single_search import (  # noqa: E402
+    SingleDroneSearchConfig,
+    SingleDroneSearchPreviewApp,
+    SingleDroneSearchRunner,
+)
 
 
 SCRIPT_DIR = ROOT / "scripts" / "swarm"
@@ -126,6 +130,17 @@ class FakeDetector:
         }
 
 
+class KeyedPreviewApp(SingleDroneSearchPreviewApp):
+    def __init__(self, *args, keys: list[int | None], **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.keys = list(keys)
+
+    def _render_preview(self, _frame, _detections):
+        if self.keys:
+            return self.keys.pop(0)
+        return None
+
+
 class SingleDroneSearchRunnerTests(unittest.TestCase):
     def test_detects_person_stops_and_lands_without_forward_motion(self) -> None:
         ip = "192.168.100.89"
@@ -192,6 +207,63 @@ class SingleDroneSearchRunnerTests(unittest.TestCase):
             single_search_script.query_battery = original_query
 
         self.assertEqual(selected, "192.168.100.90")
+
+    def test_preview_quit_does_not_take_off(self) -> None:
+        ip = "192.168.100.89"
+        controller = FakeController(ip)
+        config = SingleDroneSearchConfig(preview_enabled=True)
+        runner = KeyedPreviewApp(
+            ip,
+            PersonDetectorConfig(),
+            config,
+            controller=controller,  # type: ignore[arg-type]
+            camera=FakeCamera(ip),  # type: ignore[arg-type]
+            detector=FakeDetector(ip),  # type: ignore[arg-type]
+            keys=[ord("q")],
+        )
+
+        result = runner.run()
+
+        self.assertFalse(result.detected)
+        self.assertFalse(result.landed)
+        self.assertNotIn("ready", controller.commands)
+        self.assertNotIn("takeoff", controller.commands)
+        self.assertNotIn("land", controller.commands)
+
+    def test_preview_g_starts_search_then_lands_without_forward_motion(self) -> None:
+        ip = "192.168.100.89"
+        controller = FakeController(ip)
+        config = SingleDroneSearchConfig(
+            max_search_seconds=2.0,
+            yaw_step_degrees=20,
+            yaw_interval_seconds=0.01,
+            takeoff_settle_seconds=0,
+            confirmation_detections=2,
+            confirmation_window_seconds=3.0,
+            max_detection_age_seconds=10.0,
+            min_confidence=0.2,
+            preview_enabled=True,
+        )
+        runner = KeyedPreviewApp(
+            ip,
+            PersonDetectorConfig(),
+            config,
+            controller=controller,  # type: ignore[arg-type]
+            camera=FakeCamera(ip),  # type: ignore[arg-type]
+            detector=FakeDetector(ip),  # type: ignore[arg-type]
+            keys=[ord("g")],
+        )
+
+        result = runner.run()
+
+        self.assertTrue(result.detected)
+        self.assertTrue(result.landed)
+        self.assertIn("ready", controller.commands)
+        self.assertIn("takeoff", controller.commands)
+        self.assertIn("cw 20", controller.commands)
+        self.assertIn("stop", controller.commands)
+        self.assertIn("land", controller.commands)
+        self.assertNotIn("forward 20", controller.commands)
 
 
 if __name__ == "__main__":
