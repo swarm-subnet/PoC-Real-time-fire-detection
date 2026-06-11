@@ -139,6 +139,7 @@ class SingleDroneSearchRunnerTests(unittest.TestCase):
             confirmation_window_seconds=3.0,
             max_detection_age_seconds=10.0,
             min_confidence=0.2,
+            preview_enabled=False,
         )
         runner = SingleDroneSearchRunner(
             ip,

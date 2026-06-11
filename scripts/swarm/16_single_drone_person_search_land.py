@@ -49,6 +49,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--takeoff-settle", type=float, default=3.0, help="Seconds to settle after takeoff. Default: 3.")
     parser.add_argument("--confirm-detections", type=int, default=5, help="Detections required before landing. Default: 5.")
     parser.add_argument("--confirm-window", type=float, default=3.0, help="Confirmation window in seconds. Default: 3.")
+    parser.add_argument("--no-preview", action="store_true", help="Disable the live video preview window.")
+    parser.add_argument("--detection-hold", type=float, default=1.5, help="Seconds to keep the detection box visible before landing. Default: 1.5.")
     parser.add_argument("--person-model", default=DEFAULT_PERSON_MODEL, help=f"YOLO model. Default: {DEFAULT_PERSON_MODEL}.")
     parser.add_argument("--person-imgsz", type=int, default=DEFAULT_PERSON_IMGSZ, help=f"Inference image size. Default: {DEFAULT_PERSON_IMGSZ}.")
     parser.add_argument("--person-conf", type=float, default=DEFAULT_PERSON_CONFIDENCE, help=f"Minimum person confidence. Default: {DEFAULT_PERSON_CONFIDENCE}.")
@@ -70,6 +72,8 @@ def main() -> None:
         confirmation_detections=args.confirm_detections,
         confirmation_window_seconds=args.confirm_window,
         min_confidence=args.person_conf,
+        preview_enabled=not args.no_preview,
+        detection_hold_seconds=args.detection_hold,
     )
     detector_config = PersonDetectorConfig(
         model_name=args.person_model,
@@ -80,6 +84,8 @@ def main() -> None:
     print(f"[{timestamp()}] Single-drone person search: {ip}", flush=True)
     print("Expected behavior: takeoff -> yaw in place -> person detected -> land.", flush=True)
     print("No forward/sideways movement is sent by this script.", flush=True)
+    if not args.no_preview:
+        print("Live preview enabled: bounding boxes are drawn; press Q/Esc to abort-land.", flush=True)
 
     runner = SingleDroneSearchRunner(ip, detector_config, config)
     result = runner.run(status=lambda message: print(f"[{timestamp()}] {message}", flush=True))
@@ -127,6 +133,8 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--confirm-detections must be greater than 0")
     if args.confirm_window <= 0:
         raise ValueError("--confirm-window must be greater than 0")
+    if args.detection_hold < 0:
+        raise ValueError("--detection-hold must be 0 or greater")
     if args.person_imgsz <= 0:
         raise ValueError("--person-imgsz must be greater than 0")
     if not (0.0 < args.person_conf <= 1.0):

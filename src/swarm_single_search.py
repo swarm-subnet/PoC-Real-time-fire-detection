@@ -6,10 +6,13 @@ from dataclasses import dataclass
 import time
 from typing import Callable
 
+import cv2
+import numpy as np
+
 from swarm_camera import DEFAULT_LOCAL_VIDEO_PORT, SwarmCameraWall
 from swarm_control import SwarmController
 from swarm_detector import PersonDetectorConfig, SwarmPersonDetector
-from swarm_mission import DetectionAggregator, MissionCommand, SearchMissionConfig, TrackerCandidate
+from swarm_mission import DetectionAggregator, DetectionLike, MissionCommand, SearchMissionConfig, TrackerCandidate
 
 
 StatusCallback = Callable[[str], None]
@@ -28,6 +31,9 @@ class SingleDroneSearchConfig:
     confirmation_window_seconds: float = 3.0
     max_detection_age_seconds: float = 1.5
     min_confidence: float = 0.2
+    preview_enabled: bool = True
+    preview_window_name: str = "Single Drone Person Search"
+    detection_hold_seconds: float = 1.5
 
 
 @dataclass(frozen=True)
@@ -59,6 +65,8 @@ class SingleDroneSearchRunner:
             video_port_start=self.config.video_port_start,
         )
         self.detector = detector or SwarmPersonDetector([ip], detector_config)
+        self._preview_window_created = False
+        self._last_status_message = "starting"
         self.aggregator = DetectionAggregator(
             [ip],
             SearchMissionConfig(
@@ -109,6 +117,7 @@ class SingleDroneSearchRunner:
                 self._land(status)
             self.detector.stop()
             self.camera.stop()
+            self._close_preview()
             self.controller.close()
 
     def _search_until_detection(self, status: StatusCallback | None) -> SingleDroneSearchResult:
@@ -122,6 +131,8 @@ class SingleDroneSearchRunner:
             snapshot = self.camera.get_snapshot(copy=False)
             self.detector.update_frames(snapshot.frames, snapshot.frame_versions)
             detections = self.detector.get_detections()
+            if not self._show_preview(snapshot.frames.get(self.ip), detections.get(self.ip, [])):
+                raise KeyboardInterrupt
             self.aggregator.update(detections, now=now)
             candidate = self.aggregator.best_confirmed_candidate(now=now)
             if candidate is not None:
@@ -131,6 +142,7 @@ class SingleDroneSearchRunner:
                     f"center_error={candidate.center_error_ratio:.2f}; landing",
                 )
                 self._send_mission_command(MissionCommand(self.ip, "stop", "person detected"), status)
+                self._hold_detection_preview(snapshot.frames.get(self.ip), detections.get(self.ip, []))
                 return SingleDroneSearchResult(True, False, "person detected", candidate)
 
             if now >= next_yaw_at:
@@ -148,6 +160,102 @@ class SingleDroneSearchRunner:
         self._send_mission_command(MissionCommand(self.ip, "stop", "search timeout"), status)
         return SingleDroneSearchResult(False, False, "search timed out")
 
+    def _show_preview(self, frame: np.ndarray | None, detections: list[DetectionLike]) -> bool:
+        if not self.config.preview_enabled:
+            return True
+        if frame is None:
+            return True
+        if not self._preview_window_created:
+            cv2.namedWindow(self.config.preview_window_name, cv2.WINDOW_NORMAL)
+            cv2.resizeWindow(self.config.preview_window_name, 960, 720)
+            self._preview_window_created = True
+
+        canvas = frame.copy()
+        self._draw_detections(canvas, detections)
+        self._draw_status(canvas)
+        cv2.imshow(self.config.preview_window_name, canvas)
+        key = cv2.waitKey(1) & 0xFF
+        if key in (27, ord("q"), ord("Q")):
+            self._last_status_message = "operator abort; landing"
+            return False
+        return True
+
+    def _hold_detection_preview(self, frame: np.ndarray | None, detections: list[DetectionLike]) -> None:
+        if not self.config.preview_enabled or self.config.detection_hold_seconds <= 0:
+            return
+        deadline = time.monotonic() + self.config.detection_hold_seconds
+        self._last_status_message = "PERSON DETECTED - landing"
+        while time.monotonic() < deadline:
+            if not self._show_preview(frame, detections):
+                break
+            time.sleep(0.03)
+
+    def _draw_status(self, frame: np.ndarray) -> None:
+        height, width = frame.shape[:2]
+        overlay_h = 58
+        cv2.rectangle(frame, (0, 0), (width, overlay_h), (0, 0, 0), -1)
+        cv2.putText(
+            frame,
+            f"{self.ip} | {self._last_status_message[:80]}",
+            (14, 24),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.62,
+            (80, 230, 120),
+            2,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            frame,
+            "Q/Esc abort-land | no forward/sideways commands",
+            (14, 48),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.50,
+            (230, 235, 230),
+            1,
+            cv2.LINE_AA,
+        )
+        cv2.line(frame, (width // 2, overlay_h), (width // 2, height), (80, 160, 255), 1)
+
+    @staticmethod
+    def _draw_detections(frame: np.ndarray, detections: list[DetectionLike]) -> None:
+        target_h, target_w = frame.shape[:2]
+        for detection in detections:
+            try:
+                source_h, source_w = detection.frame_shape
+                coords = np.asarray(detection.xyxy, dtype=np.float32).reshape(-1)
+                confidence = float(detection.confidence)
+            except Exception:
+                continue
+            if coords.shape[0] != 4 or source_h <= 0 or source_w <= 0 or not np.all(np.isfinite(coords)):
+                continue
+            sx = target_w / max(1, source_w)
+            sy = target_h / max(1, source_h)
+            x1, y1, x2, y2 = (
+                int(round(float(coords[0]) * sx)),
+                int(round(float(coords[1]) * sy)),
+                int(round(float(coords[2]) * sx)),
+                int(round(float(coords[3]) * sy)),
+            )
+            x1 = int(np.clip(x1, 0, target_w - 1))
+            x2 = int(np.clip(x2, 0, target_w - 1))
+            y1 = int(np.clip(y1, 0, target_h - 1))
+            y2 = int(np.clip(y2, 0, target_h - 1))
+            if x2 <= x1 or y2 <= y1:
+                continue
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (80, 230, 120), 3)
+            label = f"person {confidence:.2f}"
+            cv2.rectangle(frame, (x1, max(0, y1 - 28)), (min(target_w - 1, x1 + 130), y1), (0, 0, 0), -1)
+            cv2.putText(frame, label, (x1 + 5, max(18, y1 - 7)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (80, 230, 120), 2, cv2.LINE_AA)
+
+    def _close_preview(self) -> None:
+        if not self._preview_window_created:
+            return
+        try:
+            cv2.destroyWindow(self.config.preview_window_name)
+        except Exception:
+            pass
+        self._preview_window_created = False
+
     def _send_mission_command(self, command: MissionCommand, status: StatusCallback | None) -> bool:
         return self.controller.send_single_command(
             command.ip,
@@ -162,7 +270,7 @@ class SingleDroneSearchRunner:
         self._status(status, "landing")
         return self.controller.land_all(status=status)
 
-    @staticmethod
-    def _status(status: StatusCallback | None, message: str) -> None:
+    def _status(self, status: StatusCallback | None, message: str) -> None:
+        self._last_status_message = message
         if status is not None:
             status(message)
