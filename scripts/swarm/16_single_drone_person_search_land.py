@@ -33,6 +33,7 @@ from swarm_single_search import (  # noqa: E402
     SingleDroneSearchPreviewApp,
     SingleDroneSearchRunner,
 )
+from tello_direct_single import DirectTelloCamera, DirectTelloController, DirectTelloLink  # noqa: E402
 from swarm_utils import (  # noqa: E402
     DEFAULT_DRONE_IPS_FILE,
     TelloUdpClient,
@@ -101,8 +102,15 @@ def main() -> None:
     else:
         print("Preview disabled: running immediate takeoff/search/land flow.", flush=True)
 
+    link = DirectTelloLink(ip)
     runner_cls = SingleDroneSearchRunner if args.no_preview else SingleDroneSearchPreviewApp
-    runner = runner_cls(ip, detector_config, config)
+    runner = runner_cls(
+        ip,
+        detector_config,
+        config,
+        controller=DirectTelloController(link),  # type: ignore[arg-type]
+        camera=DirectTelloCamera(link),  # type: ignore[arg-type]
+    )
     result = runner.run(status=lambda message: print(f"[{timestamp()}] {message}", flush=True))
     outcome = "DETECTED" if result.detected else "NOT DETECTED"
     print(f"[{timestamp()}] Result: {outcome}; landed={result.landed}; reason={result.reason}", flush=True)

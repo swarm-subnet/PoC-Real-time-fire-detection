@@ -352,13 +352,10 @@ class SingleDroneSearchPreviewApp(SingleDroneSearchRunner):
     def run(self, status: StatusCallback | None = None) -> SingleDroneSearchResult:
         result = SingleDroneSearchResult(False, False, "quit before autonomous run")
         try:
-            if not self._prepare_detector_before_video(status):
-                return SingleDroneSearchResult(False, False, "operator quit during detector startup")
-
             self._status(status, "starting live preview")
             self.camera.start()
+            self._status(status, "live preview ready; detector loading in background")
             self.detector.start()
-            self._status(status, "preview ready: verify boxes, press G to fly")
 
             while not self._stop_event.is_set():
                 snapshot = self.camera.get_snapshot(copy=False)
@@ -395,53 +392,6 @@ class SingleDroneSearchPreviewApp(SingleDroneSearchRunner):
             self.camera.stop()
             self._close_preview()
             self.controller.close()
-
-    def _prepare_detector_before_video(self, status: StatusCallback | None) -> bool:
-        self._status(status, "loading GPU person detector")
-        result: dict[str, object] = {}
-
-        def load_detector() -> None:
-            try:
-                self.detector.ensure_ready()
-                result["ok"] = True
-            except Exception as error:
-                result["error"] = error
-
-        thread = threading.Thread(target=load_detector, daemon=True)
-        thread.start()
-        while thread.is_alive() and not self._stop_event.is_set():
-            key = self._render_startup_screen("Loading GPU person detector. Video will start after this.")
-            if key in (27, ord("q"), ord("Q")):
-                self._status(status, "quit requested during detector startup")
-                self._stop_event.set()
-                break
-            time.sleep(0.03)
-        thread.join(timeout=0)
-        if self._stop_event.is_set():
-            return False
-        error = result.get("error")
-        if error is not None:
-            self._status(status, f"detector failed: {error}")
-            self._render_startup_screen(f"Detector failed: {error}")
-            cv2.waitKey(1200)
-            return False
-        self._status(status, "detector ready")
-        return True
-
-    def _render_startup_screen(self, message: str) -> int | None:
-        if not self.config.preview_enabled:
-            return None
-        if not self._preview_window_created:
-            cv2.namedWindow(self.config.preview_window_name, cv2.WINDOW_NORMAL)
-            cv2.resizeWindow(self.config.preview_window_name, self.config.preview_width, self.config.preview_height)
-            self._preview_window_created = True
-        canvas = np.full((self.config.preview_height, self.config.preview_width, 3), (17, 20, 23), dtype=np.uint8)
-        cv2.putText(canvas, "Single Drone Person Search", (28, 48), cv2.FONT_HERSHEY_SIMPLEX, 1.05, (238, 244, 240), 2, cv2.LINE_AA)
-        cv2.putText(canvas, message[:110], (30, 96), cv2.FONT_HERSHEY_SIMPLEX, 0.62, (155, 166, 166), 1, cv2.LINE_AA)
-        cv2.putText(canvas, "Q/Esc quit", (30, 136), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (230, 235, 230), 1, cv2.LINE_AA)
-        cv2.imshow(self.config.preview_window_name, canvas)
-        key = cv2.waitKey(30) & 0xFF
-        return None if key == 255 else key
 
     def _handle_preview_key(self, key: int, status: StatusCallback | None) -> None:
         char = chr(key).lower() if 0 <= key < 256 else ""

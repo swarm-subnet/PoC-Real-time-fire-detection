@@ -23,8 +23,6 @@ from swarm_video import (
 
 STREAM_RETRY_SECONDS = 3.0
 STREAM_STALL_SECONDS = 8.0
-STREAM_OPEN_TIMEOUT_SECONDS = 12.0
-STREAM_DECODER_WARMUP_SECONDS = 0.2
 DEFAULT_STREAM_RESOLUTION = "low"
 DEFAULT_STREAM_FPS = "low"
 DEFAULT_STREAM_BITRATE = 1
@@ -158,8 +156,9 @@ class SwarmCameraWall:
             try:
                 self._set_placeholder(ip, f"video {video_port}: configuring")
                 self._configure_drone_stream(ip)
-                self._set_placeholder(ip, f"video {video_port}: opening decoder")
-                cap = self._open_capture_for_new_stream(ip, video_port)
+                self._start_drone_stream(ip)
+                self._stop_event.wait(0.25)
+                cap = open_udp_capture(video_port)
                 if cap is None:
                     raise RuntimeError(f"could not open local video port {video_port}")
                 with self._lock:
@@ -197,38 +196,6 @@ class SwarmCameraWall:
                         self._caps.pop(ip, None)
 
         self._stop_drone_stream(ip, wait_response=False)
-
-    def _open_capture_for_new_stream(self, ip: str, video_port: int) -> cv2.VideoCapture | None:
-        """Open the decoder before streamon so FFmpeg sees the initial SPS/PPS packets."""
-        result: dict[str, cv2.VideoCapture | None] = {"cap": None}
-        done = threading.Event()
-        abandoned = threading.Event()
-
-        def open_capture() -> None:
-            try:
-                cap = open_udp_capture(video_port)
-                if abandoned.is_set() and cap is not None:
-                    cap.release()
-                    return
-                result["cap"] = cap
-            finally:
-                done.set()
-
-        thread = threading.Thread(target=open_capture, daemon=True)
-        thread.start()
-        self._stop_event.wait(STREAM_DECODER_WARMUP_SECONDS)
-        self._start_drone_stream(ip)
-
-        deadline = time.monotonic() + STREAM_OPEN_TIMEOUT_SECONDS
-        while not self._stop_event.is_set():
-            if done.wait(0.05):
-                return result.get("cap")
-            if time.monotonic() >= deadline:
-                abandoned.set()
-                self._stop_drone_stream(ip, wait_response=False)
-                return None
-        abandoned.set()
-        return None
 
     def _mark_packet(self, ip: str) -> None:
         with self._lock:
