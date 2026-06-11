@@ -32,6 +32,7 @@ DEFAULT_STREAM_BITRATE = 1
 class CameraSnapshot:
     frames: dict[str, np.ndarray]
     frame_versions: dict[str, int]
+    frame_timestamps: dict[str, float]
 
 
 class SwarmCameraWall:
@@ -55,6 +56,7 @@ class SwarmCameraWall:
         self.tile_size = tile_size
         self.frames: dict[str, np.ndarray] = {}
         self.frame_versions: dict[str, int] = {}
+        self.frame_timestamps: dict[str, float] = {}
         self.errors: dict[str, str] = {}
         self.packet_counts: dict[str, int] = {}
         self._caps: dict[str, cv2.VideoCapture] = {}
@@ -69,6 +71,7 @@ class SwarmCameraWall:
         with self._lock:
             self.frames = {ip: self._placeholder(ip, "starting stream") for ip in self.ips}
             self.frame_versions = {ip: 0 for ip in self.ips}
+            self.frame_timestamps = {ip: time.monotonic() for ip in self.ips}
             self.errors = {}
             self.packet_counts = {ip: 0 for ip in self.ips}
 
@@ -135,7 +138,11 @@ class SwarmCameraWall:
                 frames.setdefault(ip, self._placeholder(ip, self.errors.get(ip, "no frame")))
             if copy:
                 frames = {ip: frame.copy() for ip, frame in frames.items()}
-            return CameraSnapshot(frames=frames, frame_versions=dict(self.frame_versions))
+            return CameraSnapshot(
+                frames=frames,
+                frame_versions=dict(self.frame_versions),
+                frame_timestamps=dict(self.frame_timestamps),
+            )
 
     @property
     def running(self) -> bool:
@@ -173,6 +180,7 @@ class SwarmCameraWall:
                     with self._lock:
                         self.frames[ip] = frame
                         self.frame_versions[ip] = self.frame_versions.get(ip, 0) + 1
+                        self.frame_timestamps[ip] = now
                         self.errors.pop(ip, None)
             except Exception as error:
                 if self._stop_event.is_set():
@@ -196,6 +204,7 @@ class SwarmCameraWall:
             if count == 1 or (count % 300 == 0 and ip in self.errors):
                 self.errors[ip] = "receiving h264"
                 self.frames[ip] = self._placeholder(ip, "receiving h264")
+                self.frame_timestamps[ip] = time.monotonic()
 
     def _stop_drone_stream(self, ip: str, wait_response: bool = True, timeout: float = 3) -> None:
         try:
@@ -226,6 +235,7 @@ class SwarmCameraWall:
         with self._lock:
             self.errors[ip] = message
             self.frames[ip] = self._placeholder(ip, message)
+            self.frame_timestamps[ip] = time.monotonic()
 
     def _placeholder(self, ip: str, message: str) -> np.ndarray:
         width, height = self.tile_size

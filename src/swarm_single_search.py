@@ -71,6 +71,7 @@ class SingleDroneSearchRunner:
         self.detector = detector or SwarmPersonDetector([ip], detector_config)
         self._preview_window_created = False
         self._last_status_message = "starting"
+        self._last_frame_age_seconds: float | None = None
         self.aggregator = DetectionAggregator(
             [ip],
             SearchMissionConfig(
@@ -133,6 +134,7 @@ class SingleDroneSearchRunner:
         while time.monotonic() < deadline:
             now = time.monotonic()
             snapshot = self.camera.get_snapshot(copy=False)
+            self._record_frame_age(snapshot)
             self.detector.update_frames(snapshot.frames, snapshot.frame_versions)
             detections = self.detector.get_detections()
             if not self._show_preview(snapshot.frames.get(self.ip), detections.get(self.ip, [])):
@@ -244,12 +246,13 @@ class SingleDroneSearchRunner:
 
     def _detector_status_text(self) -> str:
         stats = self.detector.snapshot_stats()
+        age_text = "frame_age=n/a" if self._last_frame_age_seconds is None else f"frame_age={self._last_frame_age_seconds * 1000:.0f}ms"
         if stats.status == "error":
-            return f"detector=error:{stats.last_error[:80]}"
+            return f"{age_text}   detector=error:{stats.last_error[:80]}"
         if not stats.loaded:
-            return f"detector={stats.status}; video should already be live"
+            return f"{age_text}   detector={stats.status}; video should already be live"
         last_ms = "n/a" if stats.last_inference_ms is None else f"{stats.last_inference_ms:.0f}ms"
-        return f"detector=ready infer={last_ms} batches={stats.total_batches} fps={stats.overall_fps:.1f}"
+        return f"{age_text}   detector=ready infer={last_ms} batches={stats.total_batches} fps={stats.overall_fps:.1f}"
 
     @staticmethod
     def _draw_detections(frame: np.ndarray, detections: list[DetectionLike]) -> None:
@@ -316,6 +319,17 @@ class SingleDroneSearchRunner:
         if status is not None:
             status(message)
 
+    def _record_frame_age(self, snapshot: object) -> None:
+        frame_timestamps = getattr(snapshot, "frame_timestamps", None)
+        if not isinstance(frame_timestamps, dict):
+            self._last_frame_age_seconds = None
+            return
+        frame_at = frame_timestamps.get(self.ip)
+        if frame_at is None:
+            self._last_frame_age_seconds = None
+            return
+        self._last_frame_age_seconds = max(0.0, time.monotonic() - float(frame_at))
+
 
 class SingleDroneSearchPreviewApp(SingleDroneSearchRunner):
     """Preview-first one-drone app: video/detection first, flight only after G."""
@@ -345,6 +359,7 @@ class SingleDroneSearchPreviewApp(SingleDroneSearchRunner):
 
             while not self._stop_event.is_set():
                 snapshot = self.camera.get_snapshot(copy=False)
+                self._record_frame_age(snapshot)
                 self.detector.update_frames(snapshot.frames, snapshot.frame_versions)
                 detections = self.detector.get_detections()
                 key = self._render_preview(snapshot.frames.get(self.ip), detections.get(self.ip, []))

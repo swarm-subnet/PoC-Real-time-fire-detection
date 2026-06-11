@@ -14,6 +14,7 @@ import cv2
 
 DEFAULT_TELLO_VIDEO_PORT = 11111
 DEFAULT_LOCAL_VIDEO_PORT = 12111
+LOW_LATENCY_FFMPEG_OPTIONS = "fflags;nobuffer|flags;low_delay|probesize;32768|analyzeduration;0"
 
 
 PacketCallback = Callable[[str], None]
@@ -104,18 +105,55 @@ class UdpVideoDemuxer:
 
 
 def open_udp_capture(port: int) -> cv2.VideoCapture | None:
-    urls = [
-        f"udp://@127.0.0.1:{port}?fifo_size=50000000&overrun_nonfatal=1",
-        f"udp://@0.0.0.0:{port}?fifo_size=50000000&overrun_nonfatal=1",
-        f"udp://@:{port}?fifo_size=50000000&overrun_nonfatal=1",
+    low_latency_urls = [
+        f"udp://@127.0.0.1:{port}?fifo_size=1000000&overrun_nonfatal=1&buffer_size=65536",
+        f"udp://@0.0.0.0:{port}?fifo_size=1000000&overrun_nonfatal=1&buffer_size=65536",
+        f"udp://@:{port}?fifo_size=1000000&overrun_nonfatal=1&buffer_size=65536",
+    ]
+    fallback_urls = [
+        f"udp://@127.0.0.1:{port}?fifo_size=5000000&overrun_nonfatal=1",
+        f"udp://@0.0.0.0:{port}?fifo_size=5000000&overrun_nonfatal=1",
+        f"udp://@:{port}?fifo_size=5000000&overrun_nonfatal=1",
         f"udp://@127.0.0.1:{port}",
         f"udp://@0.0.0.0:{port}",
         f"udp://0.0.0.0:{port}",
         f"udp://@:{port}",
     ]
+
+    cap = _try_open_urls(low_latency_urls, ffmpeg_options=LOW_LATENCY_FFMPEG_OPTIONS)
+    if cap is not None:
+        return cap
+    return _try_open_urls(fallback_urls, ffmpeg_options=None)
+
+
+def _try_open_urls(urls: list[str], ffmpeg_options: str | None) -> cv2.VideoCapture | None:
+    previous_options = os.environ.get("OPENCV_FFMPEG_CAPTURE_OPTIONS")
+    if ffmpeg_options is not None:
+        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = ffmpeg_options
+
     for url in urls:
         cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
         if cap.isOpened():
+            _apply_low_latency_capture_settings(cap)
+            if previous_options is None and ffmpeg_options is not None:
+                os.environ.pop("OPENCV_FFMPEG_CAPTURE_OPTIONS", None)
+            elif previous_options is not None:
+                os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = previous_options
             return cap
         cap.release()
+    if previous_options is None and ffmpeg_options is not None:
+        os.environ.pop("OPENCV_FFMPEG_CAPTURE_OPTIONS", None)
+    elif previous_options is not None:
+        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = previous_options
     return None
+
+
+def _apply_low_latency_capture_settings(cap: cv2.VideoCapture) -> None:
+    for prop, value in (
+        (cv2.CAP_PROP_BUFFERSIZE, 1),
+        (cv2.CAP_PROP_FPS, 30),
+    ):
+        try:
+            cap.set(prop, value)
+        except Exception:
+            pass
