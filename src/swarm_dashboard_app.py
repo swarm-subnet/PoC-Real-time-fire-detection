@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import os
 import threading
 import time
@@ -12,9 +12,17 @@ os.environ.setdefault("OPENCV_FFMPEG_LOGLEVEL", "-8")
 
 import cv2
 
-from swarm_camera import DEFAULT_LOCAL_VIDEO_PORT, SwarmCameraWall
+from swarm_camera import DEFAULT_LOCAL_VIDEO_PORT, CameraSnapshot, SwarmCameraWall
 from swarm_control import SwarmController, console_status
 from swarm_dashboard import DashboardViewState, SwarmDashboardRenderer
+from swarm_detector import (
+    DEFAULT_PERSON_CONFIDENCE,
+    DEFAULT_PERSON_IMGSZ,
+    DEFAULT_PERSON_MODEL,
+    PersonDetectorConfig,
+    SwarmPersonDetector,
+)
+from swarm_mission import MissionCommand, MissionState, SearchMission, SearchMissionConfig
 from swarm_state import DroneRuntimeState
 from swarm_telemetry import TelloTelemetry, TelloTelemetryListener
 
@@ -25,6 +33,8 @@ DEFAULT_THERMAL_COOLING_START_C = 78
 DEFAULT_THERMAL_COOLING_STOP_C = 75
 DEFAULT_THERMAL_COOLING_MIN_SECONDS = 45.0
 DEFAULT_THERMAL_VIDEO_STOP_C = 82
+DEFAULT_FLIGHT_MIN_BATTERY_PERCENT = 20
+DEFAULT_UI_WAIT_MS = 10
 WINDOW_NAME = "Swarm Bench Dashboard"
 
 
@@ -44,14 +54,14 @@ class SwarmDashboardConfig:
     thermal_cooling_min_seconds: float = DEFAULT_THERMAL_COOLING_MIN_SECONDS
     thermal_video_stop_c: int = DEFAULT_THERMAL_VIDEO_STOP_C
     auto_stop_video_on_heat: bool = True
+    flight_min_battery: int = DEFAULT_FLIGHT_MIN_BATTERY_PERCENT
+    person_model_name: str = DEFAULT_PERSON_MODEL
+    person_imgsz: int = DEFAULT_PERSON_IMGSZ
+    person_confidence: float = DEFAULT_PERSON_CONFIDENCE
 
 
 class DashboardApp:
-    """OpenCV dashboard app for bench-only swarm checks.
-
-    This app intentionally exposes no flight commands. It can refresh status,
-    restart video streams, and run the low-speed `motoron`/`motoroff` bench test.
-    """
+    """OpenCV dashboard app for guarded swarm bench and search commands."""
 
     def __init__(self, config: SwarmDashboardConfig) -> None:
         self.config = config
@@ -61,6 +71,15 @@ class DashboardApp:
             config.ips,
             video_port_start=config.video_port_start,
         )
+        self.detector = SwarmPersonDetector(
+            config.ips,
+            PersonDetectorConfig(
+                model_name=config.person_model_name,
+                imgsz=config.person_imgsz,
+                confidence=config.person_confidence,
+            ),
+        )
+        self.mission = SearchMission(config.ips, SearchMissionConfig(min_confidence=config.person_confidence))
         self.telemetry = TelloTelemetryListener(config.ips, self._handle_telemetry)
         self.renderer = SwarmDashboardRenderer(width=config.width, height=config.height)
         self.view = DashboardViewState(
@@ -85,47 +104,90 @@ class DashboardApp:
         self._manual_spin_deadline = 0.0
         self._manual_spin_retry_requested = False
         self._manual_spin_lock = threading.RLock()
+        self._mission_thread = threading.Thread(target=self._mission_loop, daemon=True)
+        self._mission_command_lock = threading.RLock()
 
     def run(self) -> None:
+        window_created = False
+
+        try:
+            if self.config.camera_wall_enabled:
+                self.detector.ensure_ready()
+            self._create_window()
+            window_created = True
+            self._start_runtime()
+            self._set_banner("dashboard ready")
+
+            while not self._stop_event.is_set():
+                states, view = self._build_render_payload()
+                frame = self.renderer.render(states, view)
+                cv2.imshow(WINDOW_NAME, frame)
+                key = cv2.waitKey(DEFAULT_UI_WAIT_MS) & 0xFF
+                if key != 255:
+                    self._handle_key(key)
+        finally:
+            self._stop_runtime(window_created)
+
+    def _create_window(self) -> None:
         cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
         cv2.resizeWindow(WINDOW_NAME, self.config.width, self.config.height)
         cv2.setMouseCallback(WINDOW_NAME, self._handle_mouse)
 
+    def _start_runtime(self) -> None:
         self.telemetry.start()
         if self.config.camera_wall_enabled:
             self.camera.start()
+            self.detector.start()
         self._status_thread.start()
-        self._set_banner("dashboard ready")
+        self._mission_thread.start()
 
-        try:
-            while not self._stop_event.is_set():
-                with self._view_lock:
-                    self.view.action_busy = self._action_thread is not None and self._action_thread.is_alive()
-                    self.view.manual_spin_active = self._manual_spin_is_active()
-                    self.view.camera_enabled = self.camera.running
-                    self.view.camera_frames = self.camera.get_frames() if self.config.camera_wall_enabled else None
-                    states = self.controller.snapshot()
-                    self._maybe_handle_thermal(states)
-                    frame = self.renderer.render(states, self.view)
-
-                cv2.imshow(WINDOW_NAME, frame)
-                key = cv2.waitKey(50) & 0xFF
-                if key != 255:
-                    self._handle_key(key)
-        finally:
-            self._stop_event.set()
-            self.camera.stop()
-            self._wait_for_manual_spin()
-            self._wait_for_cooling_command()
-            self._stop_cooling_motors()
-            self.telemetry.stop()
-            self.controller.close()
+    def _stop_runtime(self, window_created: bool) -> None:
+        self._stop_event.set()
+        self.detector.stop()
+        self.camera.stop()
+        self._wait_for_manual_spin()
+        self._wait_for_cooling_command()
+        self._stop_cooling_motors()
+        self.telemetry.stop()
+        self.controller.close()
+        if window_created:
             cv2.destroyWindow(WINDOW_NAME)
+
+    def _build_render_payload(self) -> tuple[list[DroneRuntimeState], DashboardViewState]:
+        camera_snapshot = self._latest_camera_snapshot()
+        frames = camera_snapshot.frames if camera_snapshot is not None else None
+        if camera_snapshot is not None:
+            self.detector.update_frames(camera_snapshot.frames, camera_snapshot.frame_versions)
+
+        states = self.controller.snapshot()
+        detections = self.detector.get_detections()
+        detector_stats = self.detector.snapshot_stats()
+        self._maybe_handle_thermal(states)
+
+        with self._view_lock:
+            self.view.action_busy = self._action_thread is not None and self._action_thread.is_alive()
+            self.view.manual_spin_active = self._manual_spin_is_active()
+            self.view.camera_enabled = self.camera.running
+            self.view.camera_frames = frames
+            self.view.person_detections = detections
+            self.view.person_detector_stats = detector_stats
+            self.view.mission_snapshot = self.mission.snapshot()
+            view_snapshot = replace(self.view)
+
+        return states, view_snapshot
+
+    def _latest_camera_snapshot(self) -> CameraSnapshot | None:
+        if not self.config.camera_wall_enabled:
+            return None
+        return self.camera.get_snapshot(copy=False)
 
     def _status_loop(self) -> None:
         while not self._stop_event.is_set():
             try:
-                if self._action_thread and self._action_thread.is_alive():
+                if (
+                    self._action_thread and self._action_thread.is_alive()
+                    or self._mission_command_active()
+                ):
                     self._stop_event.wait(max(1.0, self.config.status_every))
                     continue
                 self.controller.refresh_all(retries=self.config.status_retries, status=self._set_banner)
@@ -148,6 +210,16 @@ class DashboardApp:
             )
         elif char == "m":
             self._request_manual_motor_spin()
+        elif char == "p":
+            self._start_action("preflight", self._preflight_all)
+        elif char == "g":
+            self._start_action("search", self._start_search_mission)
+        elif char == "h":
+            self._start_action("hold", self._hold_all)
+        elif char == "l":
+            self._start_action("land", self._land_all)
+        elif char == "a":
+            self._start_action("abort", self._abort_mission)
         elif char == "c":
             self._cycle_selected_drone()
         elif char == "v":
@@ -164,8 +236,20 @@ class DashboardApp:
         )
 
     def _handle_mouse(self, event: int, x: int, y: int, _flags: int, _param: object) -> None:
-        if event == cv2.EVENT_LBUTTONDOWN and self.renderer.hit_test_motor_button(x, y):
+        if event != cv2.EVENT_LBUTTONDOWN:
+            return
+        if self.renderer.hit_test_motor_button(x, y):
             self._request_manual_motor_spin()
+        elif self.renderer.hit_test_preflight_button(x, y):
+            self._start_action("preflight", self._preflight_all)
+        elif self.renderer.hit_test_search_button(x, y):
+            self._start_action("search", self._start_search_mission)
+        elif self.renderer.hit_test_hold_button(x, y):
+            self._start_action("hold", self._hold_all)
+        elif self.renderer.hit_test_land_button(x, y):
+            self._start_action("land", self._land_all)
+        elif self.renderer.hit_test_abort_button(x, y):
+            self._start_action("abort", self._abort_mission)
 
     def _request_manual_motor_spin(self) -> None:
         with self._manual_spin_lock:
@@ -264,6 +348,124 @@ class DashboardApp:
             self._set_banner("camera wall restarted")
         except Exception as error:
             self._set_banner(f"camera wall failed: {error}")
+
+    def _preflight_all(self) -> bool:
+        self.mission.mark_preflight()
+        return self.controller.check_all_ready(
+            retries=self.config.status_retries,
+            min_battery=self.config.flight_min_battery,
+            status=self._set_banner,
+        )
+
+    def _start_search_mission(self) -> bool:
+        if self.controller.any_airborne():
+            self.mission.start_search()
+            self._set_banner("search started on airborne drones")
+            return True
+        if not self.config.camera_wall_enabled:
+            self._set_banner("search blocked: camera wall disabled")
+            return False
+        self._prepare_flight_command()
+        self.mission.mark_preflight()
+        ready = self.controller.check_all_ready(
+            retries=self.config.status_retries,
+            min_battery=self.config.flight_min_battery,
+            status=self._set_banner,
+        )
+        if not ready:
+            self._set_banner("search blocked: preflight failed")
+            return False
+        self.mission.mark_takeoff_sequence()
+        ok = self.controller.takeoff_sequential(settle_seconds=2.0, status=self._set_banner)
+        if not ok:
+            self._set_banner("takeoff incomplete; landing all reachable drones")
+            self.controller.land_all(status=self._set_banner)
+            self.mission.hold()
+            return False
+        self.mission.start_search()
+        self._set_banner("stationary person search started")
+        return True
+
+    def _hold_all(self) -> bool:
+        self.mission.hold()
+        self.controller.stop_ips(self.controller.ips, status=self._set_banner)
+        self._set_banner("hold command sent")
+        return True
+
+    def _land_all(self) -> bool:
+        self.mission.mark_landing()
+        self._prepare_flight_command()
+        ok = self.controller.land_all(status=self._set_banner)
+        self.mission.hold()
+        return ok
+
+    def _abort_mission(self) -> bool:
+        self.mission.abort()
+        self._prepare_flight_command()
+        ok = self.controller.land_all(status=self._set_banner)
+        self._set_banner("abort: best-effort land sent")
+        return ok
+
+    def _prepare_flight_command(self) -> None:
+        with self._manual_spin_lock:
+            self._manual_spin_deadline = time.monotonic()
+            self._manual_spin_retry_requested = False
+        self._wait_for_manual_spin()
+        self._wait_for_cooling_command()
+        self._stop_cooling_motors()
+
+    def _mission_loop(self) -> None:
+        while not self._stop_event.is_set():
+            try:
+                if self._action_thread and self._action_thread.is_alive():
+                    self._stop_event.wait(0.1)
+                    continue
+                detections = self.detector.get_detections()
+                commands = self.mission.tick(detections)
+                for command in commands:
+                    if self._stop_event.is_set():
+                        break
+                    self._execute_mission_command(command)
+            except Exception as error:
+                self._set_banner(f"mission failed: {error}")
+                self.mission.hold()
+            self._stop_event.wait(0.05)
+
+    def _execute_mission_command(self, command: MissionCommand) -> None:
+        state = self.mission.snapshot().state
+        if state in {MissionState.LAND_SEQUENCE, MissionState.ABORT}:
+            return
+        if state == MissionState.HOLD_ALL and command.command != "stop":
+            return
+        with self._mission_command_lock:
+            ok = self.controller.send_single_command(
+                command.ip,
+                command.command,
+                timeout=8,
+                retries=1,
+                status=self._set_banner,
+                command_state=command.reason[:24],
+            )
+            if ok and command.followup_stop:
+                self.controller.send_single_command(
+                    command.ip,
+                    "stop",
+                    timeout=4,
+                    retries=1,
+                    status=self._set_banner,
+                    command_state="reassess",
+                )
+            self.mission.mark_command_complete(command.ip, command.command, ok)
+
+    def _mission_command_active(self) -> bool:
+        return self.mission.snapshot().state in {
+            MissionState.STATIONARY_YAW_SEARCH,
+            MissionState.TRACKER_ACQUIRE,
+            MissionState.TRACKER_CENTER,
+            MissionState.TRACKER_APPROACH_STEP,
+            MissionState.TRACKER_REASSESS,
+            MissionState.TARGET_LOST,
+        }
 
     def _maybe_handle_thermal(self, states: list[DroneRuntimeState]) -> None:
         self._maybe_cool_with_motors(states)

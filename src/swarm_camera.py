@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import os
 import threading
 import time
@@ -22,6 +23,15 @@ from swarm_video import (
 
 STREAM_RETRY_SECONDS = 3.0
 STREAM_STALL_SECONDS = 8.0
+DEFAULT_STREAM_RESOLUTION = "low"
+DEFAULT_STREAM_FPS = "low"
+DEFAULT_STREAM_BITRATE = 1
+
+
+@dataclass(frozen=True)
+class CameraSnapshot:
+    frames: dict[str, np.ndarray]
+    frame_versions: dict[str, int]
 
 
 class SwarmCameraWall:
@@ -44,6 +54,7 @@ class SwarmCameraWall:
         }
         self.tile_size = tile_size
         self.frames: dict[str, np.ndarray] = {}
+        self.frame_versions: dict[str, int] = {}
         self.errors: dict[str, str] = {}
         self.packet_counts: dict[str, int] = {}
         self._caps: dict[str, cv2.VideoCapture] = {}
@@ -57,6 +68,7 @@ class SwarmCameraWall:
         self._stop_event.clear()
         with self._lock:
             self.frames = {ip: self._placeholder(ip, "starting stream") for ip in self.ips}
+            self.frame_versions = {ip: 0 for ip in self.ips}
             self.errors = {}
             self.packet_counts = {ip: 0 for ip in self.ips}
 
@@ -83,10 +95,6 @@ class SwarmCameraWall:
     def stop(self) -> None:
         had_streams = bool(self._threads) or bool(self._caps)
         self._stop_event.set()
-        for thread in list(self._threads.values()):
-            if thread.is_alive():
-                thread.join(timeout=2)
-        self._threads.clear()
 
         if self._demuxer is not None:
             self._demuxer.stop()
@@ -99,22 +107,35 @@ class SwarmCameraWall:
                 pass
         self._caps.clear()
 
+        for thread in list(self._threads.values()):
+            if thread.is_alive():
+                thread.join(timeout=0.5)
+        self._threads.clear()
+
         if had_streams:
             for ip in self.ips:
-                try:
-                    self.client.send_one(ip, "streamoff", timeout=3, retries=1, verbose=False)
-                except Exception:
-                    pass
+                self._stop_drone_stream(ip, wait_response=False)
 
     def restart(self) -> None:
         self.start()
 
-    def get_frames(self) -> dict[str, np.ndarray]:
+    def get_frames(self, copy: bool = True) -> dict[str, np.ndarray]:
         with self._lock:
             frames = dict(self.frames)
             for ip in self.ips:
                 frames.setdefault(ip, self._placeholder(ip, self.errors.get(ip, "no frame")))
-            return {ip: frame.copy() for ip, frame in frames.items()}
+            if copy:
+                return {ip: frame.copy() for ip, frame in frames.items()}
+            return frames
+
+    def get_snapshot(self, copy: bool = True) -> CameraSnapshot:
+        with self._lock:
+            frames = dict(self.frames)
+            for ip in self.ips:
+                frames.setdefault(ip, self._placeholder(ip, self.errors.get(ip, "no frame")))
+            if copy:
+                frames = {ip: frame.copy() for ip, frame in frames.items()}
+            return CameraSnapshot(frames=frames, frame_versions=dict(self.frame_versions))
 
     @property
     def running(self) -> bool:
@@ -151,6 +172,7 @@ class SwarmCameraWall:
                     last_frame_at = now
                     with self._lock:
                         self.frames[ip] = frame
+                        self.frame_versions[ip] = self.frame_versions.get(ip, 0) + 1
                         self.errors.pop(ip, None)
             except Exception as error:
                 if self._stop_event.is_set():
@@ -165,7 +187,7 @@ class SwarmCameraWall:
                     if self._caps.get(ip) is cap:
                         self._caps.pop(ip, None)
 
-        self._stop_drone_stream(ip)
+        self._stop_drone_stream(ip, wait_response=False)
 
     def _mark_packet(self, ip: str) -> None:
         with self._lock:
@@ -175,18 +197,21 @@ class SwarmCameraWall:
                 self.errors[ip] = "receiving h264"
                 self.frames[ip] = self._placeholder(ip, "receiving h264")
 
-    def _stop_drone_stream(self, ip: str) -> None:
+    def _stop_drone_stream(self, ip: str, wait_response: bool = True, timeout: float = 3) -> None:
         try:
-            self.client.send_one(ip, "streamoff", timeout=3, retries=1, verbose=False)
+            if wait_response:
+                self.client.send_one(ip, "streamoff", timeout=timeout, retries=1, retry_pause=0, verbose=False)
+            else:
+                self.client.send_no_wait(ip, "streamoff", verbose=False)
         except Exception:
             pass
 
     def _configure_drone_stream(self, ip: str) -> None:
         self.client.send_one(ip, "command", timeout=4, retries=3, verbose=False)
-        self._stop_drone_stream(ip)
-        self._try_send(ip, "setresolution low")
-        self._try_send(ip, "setfps low")
-        self._try_send(ip, "setbitrate 1")
+        self._stop_drone_stream(ip, wait_response=True, timeout=1)
+        self._try_send(ip, f"setresolution {DEFAULT_STREAM_RESOLUTION}")
+        self._try_send(ip, f"setfps {DEFAULT_STREAM_FPS}")
+        self._try_send(ip, f"setbitrate {DEFAULT_STREAM_BITRATE}")
 
     def _start_drone_stream(self, ip: str) -> None:
         self.client.send_one(ip, "streamon", timeout=5, retries=3, verbose=False)

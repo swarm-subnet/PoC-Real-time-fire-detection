@@ -83,6 +83,37 @@ class SwarmController:
             return False
         return True
 
+    def check_all_ready(
+        self,
+        retries: int = 2,
+        min_battery: int | None = None,
+        status: StatusCallback | None = None,
+    ) -> bool:
+        """Require every configured drone to answer before a swarm action starts."""
+        self._set_action("ready_check")
+        failures: list[str] = []
+        try:
+            for ip in self.ips:
+                passed = self.refresh_one(ip, retries=retries)
+                state = self.states[ip]
+                battery = state.battery
+                if not passed:
+                    failures.append(f"{ip}: offline")
+                elif min_battery is not None and battery is None:
+                    failures.append(f"{ip}: no battery")
+                elif min_battery is not None and battery < min_battery:
+                    failures.append(f"{ip}: {battery}% < {min_battery}%")
+
+            if failures:
+                if status:
+                    status("ready check failed: " + "; ".join(failures))
+                return False
+            if status:
+                status("ready check passed")
+            return True
+        finally:
+            self._set_action("idle")
+
     def refresh_one(self, ip: str, retries: int = 1) -> bool:
         with self.lock:
             self._update_state(ip, command_state="checking", last_command="battery?")
@@ -211,6 +242,49 @@ class SwarmController:
                     status("takeoff incomplete: " + ", ".join(failed))
                 else:
                     status("takeoff complete")
+            return not failed
+        finally:
+            self._set_action("idle")
+
+    def takeoff_sequential(
+        self,
+        settle_seconds: float = 2.0,
+        status: StatusCallback | None = None,
+    ) -> bool:
+        """Take off one drone at a time to reduce launch risk."""
+        self._set_action("takeoff_sequence")
+        failed: list[str] = []
+        try:
+            for index, ip in enumerate(self.ips, start=1):
+                if status:
+                    status(f"takeoff {index}/{len(self.ips)}: {ip}")
+                self._mark_command([ip], "takeoff")
+                try:
+                    response = self.client.send_one(ip, "takeoff", timeout=12, retries=1)
+                except Exception:
+                    response = None
+                ok = self._response_ok(response)
+                if not ok:
+                    failed.append(ip)
+                with self.lock:
+                    self._update_state(
+                        ip,
+                        airborne=self.states[ip].airborne or ok,
+                        command_state="hovering" if ok else "error",
+                        last_command="takeoff",
+                        last_response=response.text if response else "timeout",
+                        last_error="" if ok else "takeoff failed or timed out",
+                        last_latency_ms=response.latency_ms if response else None,
+                        seen=response is not None,
+                    )
+                if ok and settle_seconds > 0:
+                    time.sleep(settle_seconds)
+
+            if status:
+                if failed:
+                    status("takeoff sequence incomplete: " + ", ".join(failed))
+                else:
+                    status("takeoff sequence complete")
             return not failed
         finally:
             self._set_action("idle")
@@ -394,6 +468,46 @@ class SwarmController:
             if failed:
                 status("cooling motoroff failed: " + ", ".join(failed))
         return ok_ips
+
+    def send_single_command(
+        self,
+        ip: str,
+        command: str,
+        timeout: float = 8,
+        retries: int = 1,
+        status: StatusCallback | None = None,
+        command_state: str = "mission",
+    ) -> bool:
+        if ip not in self.states:
+            if status:
+                status(f"mission command skipped for unknown drone: {ip}")
+            return False
+        self._mark_command([ip], command)
+        try:
+            response = self.client.send_one(ip, command, timeout=timeout, retries=retries)
+        except Exception:
+            response = None
+        ok = self._response_ok(response)
+        with self.lock:
+            self._update_state(
+                ip,
+                command_state=command_state if ok else "error",
+                last_command=command,
+                last_response=response.text if response else "timeout",
+                last_error="" if ok else f"{command} failed or timed out",
+                last_latency_ms=response.latency_ms if response else None,
+                seen=response is not None,
+            )
+        if status:
+            status(f"{command} {'ok' if ok else 'failed'}: {ip}")
+        return ok
+
+    def stop_ips(self, ips: list[str], status: StatusCallback | None = None) -> list[str]:
+        stopped: list[str] = []
+        for ip in ips:
+            if self.send_single_command(ip, "stop", timeout=4, retries=1, status=status, command_state="holding"):
+                stopped.append(ip)
+        return stopped
 
     def emergency_all(self, status: StatusCallback | None = None) -> None:
         self._set_action("emergency")

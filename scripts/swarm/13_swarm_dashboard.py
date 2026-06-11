@@ -25,6 +25,10 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from swarm_dashboard_app import (  # noqa: E402
+    DEFAULT_FLIGHT_MIN_BATTERY_PERCENT,
+    DEFAULT_PERSON_CONFIDENCE,
+    DEFAULT_PERSON_IMGSZ,
+    DEFAULT_PERSON_MODEL,
     DEFAULT_THERMAL_COOLING_START_C,
     DEFAULT_THERMAL_COOLING_STOP_C,
     DEFAULT_LOCAL_VIDEO_PORT,
@@ -57,9 +61,32 @@ def parse_args() -> argparse.Namespace:
         help="Seconds to spin props after the last M/button press. Default: 2.0.",
     )
     parser.add_argument(
+        "--flight-min-battery",
+        type=int,
+        default=DEFAULT_FLIGHT_MIN_BATTERY_PERCENT,
+        help=f"Minimum battery required for search takeoff. Default: {DEFAULT_FLIGHT_MIN_BATTERY_PERCENT}.",
+    )
+    parser.add_argument(
         "--no-camera-wall",
         action="store_true",
         help="Disable live video streams if you only want status/control.",
+    )
+    parser.add_argument(
+        "--person-model",
+        default=DEFAULT_PERSON_MODEL,
+        help=f"Ultralytics YOLO model for person detection. Default: {DEFAULT_PERSON_MODEL}.",
+    )
+    parser.add_argument(
+        "--person-imgsz",
+        type=int,
+        default=DEFAULT_PERSON_IMGSZ,
+        help=f"Detector inference image size. Default: {DEFAULT_PERSON_IMGSZ}.",
+    )
+    parser.add_argument(
+        "--person-conf",
+        type=float,
+        default=DEFAULT_PERSON_CONFIDENCE,
+        help=f"Minimum person confidence. Default: {DEFAULT_PERSON_CONFIDENCE}.",
     )
     parser.add_argument(
         "--video-port-start",
@@ -115,6 +142,12 @@ def main() -> None:
         raise ValueError("--status-retries must be greater than 0")
     if args.motor_spin_seconds <= 0:
         raise ValueError("--motor-spin-seconds must be greater than 0")
+    if args.flight_min_battery < 0:
+        raise ValueError("--flight-min-battery must be 0 or greater")
+    if args.person_imgsz <= 0:
+        raise ValueError("--person-imgsz must be greater than 0")
+    if not (0.0 < args.person_conf <= 1.0):
+        raise ValueError("--person-conf must be in (0, 1]")
     if args.video_port_start < 1025:
         raise ValueError("--video-port-start must be >= 1025")
     if args.thermal_warning_c <= 0:
@@ -152,6 +185,10 @@ def main() -> None:
         thermal_cooling_stop_c=args.thermal_cooling_stop_c,
         thermal_video_stop_c=args.thermal_video_stop_c,
         auto_stop_video_on_heat=not args.no_thermal_video_stop,
+        flight_min_battery=args.flight_min_battery,
+        person_model_name=args.person_model,
+        person_imgsz=args.person_imgsz,
+        person_confidence=args.person_conf,
     )
     app = DashboardApp(config)
     print(f"Loaded {len(ips)} drone(s): {', '.join(ips)}")

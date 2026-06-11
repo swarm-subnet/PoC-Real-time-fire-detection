@@ -1,3 +1,4 @@
 djitellopy
 opencv-python
 onnxruntime
+ultralytics

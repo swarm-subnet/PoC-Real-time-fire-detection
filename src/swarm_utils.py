@@ -144,9 +144,25 @@ class TelloUdpClient:
                 last_error = error
                 if verbose:
                     print(f"[{timestamp()}] !! {ip}: timeout waiting for '{command}' attempt {attempt}/{retries}")
-                time.sleep(retry_pause)
+                if attempt < retries and retry_pause > 0:
+                    time.sleep(retry_pause)
 
         raise TimeoutError(f"Command '{command}' timed out for {ip} after {retries} attempt(s)") from last_error
+
+    def send_no_wait(self, ip: str, command: str, verbose: bool = True) -> bool:
+        """Best-effort command send without waiting for an SDK response."""
+        acquired = self._io_lock.acquire(blocking=False)
+        if not acquired:
+            return False
+        try:
+            if verbose:
+                print(f"[{timestamp()}] >> {ip}: {command} (no-wait)")
+            self.sock.sendto(command.encode("utf-8"), (ip, self.port))
+            return True
+        except OSError:
+            return False
+        finally:
+            self._io_lock.release()
 
     def send_text(
         self,
