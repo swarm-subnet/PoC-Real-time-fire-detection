@@ -5,15 +5,24 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import shlex
-import socket
+import sys
 import time
 
 
-DRONE_IPS_FILE = Path(__file__).with_name("drone_ips.txt")
-TELLO_PORT = 8889
-COMMAND_TIMEOUT_SECONDS = 7
+ROOT_DIR = Path(__file__).resolve().parents[2]
+SRC_DIR = ROOT_DIR / "src"
 MIN_FLIGHT_BATTERY_PERCENT = 30
 DEFAULT_SPIN_SECONDS = 3
+
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
+from swarm_utils import (  # noqa: E402
+    DEFAULT_DRONE_IPS_FILE,
+    TelloUdpClient,
+    load_registered_ips,
+    query_battery,
+)
 
 
 @dataclass
@@ -23,69 +32,6 @@ class DroneStatus:
     battery: int | None = None
     response: str | None = None
     error: str | None = None
-
-
-class TelloUdpClient:
-    """Small SDK transport that keeps a stable local UDP source port."""
-
-    def __init__(self, port: int = TELLO_PORT) -> None:
-        self.port = port
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.sock.bind(("", port))
-
-    def close(self) -> None:
-        self.sock.close()
-
-    def drain(self) -> None:
-        previous_timeout = self.sock.gettimeout()
-        self.sock.settimeout(0.05)
-        try:
-            while True:
-                self.sock.recvfrom(1024)
-        except TimeoutError:
-            pass
-        finally:
-            self.sock.settimeout(previous_timeout)
-
-    def send_one(self, ip: str, command: str, timeout: float = COMMAND_TIMEOUT_SECONDS) -> str:
-        self.drain()
-        self.sock.settimeout(timeout)
-        print(f"[{timestamp()}] >> {ip}: {command}")
-        self.sock.sendto(command.encode("utf-8"), (ip, self.port))
-        response, addr = self.sock.recvfrom(1024)
-        decoded = response.decode(errors="replace").strip()
-        print(f"[{timestamp()}] << {addr[0]}: {decoded}")
-        return decoded
-
-    def send_all(self, ips: list[str], command: str, timeout: float = COMMAND_TIMEOUT_SECONDS) -> dict[str, str]:
-        """Fan out a command to all drones first, then collect responses."""
-        self.drain()
-        responses: dict[str, str] = {}
-        pending = set(ips)
-
-        for ip in ips:
-            print(f"[{timestamp()}] >> {ip}: {command}")
-            self.sock.sendto(command.encode("utf-8"), (ip, self.port))
-
-        deadline = time.time() + timeout
-        while pending and time.time() < deadline:
-            self.sock.settimeout(max(0.05, deadline - time.time()))
-            try:
-                response, addr = self.sock.recvfrom(1024)
-            except TimeoutError:
-                break
-
-            source_ip = addr[0]
-            decoded = response.decode(errors="replace").strip()
-            responses[source_ip] = decoded
-            pending.discard(source_ip)
-            print(f"[{timestamp()}] << {source_ip}: {decoded}")
-
-        for ip in sorted(pending):
-            print(f"[{timestamp()}] !! {ip}: timeout waiting for '{command}'")
-
-        return responses
 
 
 class SwarmFlightController:
@@ -110,7 +56,7 @@ class SwarmFlightController:
         for ip in self.ips:
             try:
                 self.client.send_one(ip, "command", timeout=3)
-                battery = int(self.client.send_one(ip, "battery?", timeout=3))
+                battery, _latency_ms = query_battery(self.client, ip, timeout=3, retries=1)
                 statuses.append(DroneStatus(ip=ip, ok=True, battery=battery))
             except Exception as error:
                 statuses.append(DroneStatus(ip=ip, ok=False, error=str(error)))
@@ -205,22 +151,6 @@ class SwarmFlightController:
             )
 
 
-def timestamp() -> str:
-    return time.strftime("%H:%M:%S")
-
-
-def load_registered_ips() -> list[str]:
-    if not DRONE_IPS_FILE.exists():
-        return []
-
-    ips: list[str] = []
-    for line in DRONE_IPS_FILE.read_text(encoding="utf-8").splitlines():
-        clean = line.strip()
-        if clean and not clean.startswith("#"):
-            ips.append(clean)
-    return ips
-
-
 def print_status_table(statuses: list[DroneStatus]) -> None:
     print("")
     print("Drone status")
@@ -312,7 +242,7 @@ def run_repl(controller: SwarmFlightController) -> None:
 def main() -> None:
     ips = load_registered_ips()
     if not ips:
-        print(f"No registered drones found in {DRONE_IPS_FILE}.")
+        print(f"No registered drones found in {DEFAULT_DRONE_IPS_FILE}.")
         print("Run scripts/swarm/09_setup_new_drone.py for each drone first.")
         return
 
