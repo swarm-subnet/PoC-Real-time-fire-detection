@@ -18,6 +18,16 @@ from swarm_detector import PersonDetectorConfig  # noqa: E402
 from swarm_single_search import SingleDroneSearchConfig, SingleDroneSearchRunner  # noqa: E402
 
 
+SCRIPT_DIR = ROOT / "scripts" / "swarm"
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+import importlib  # noqa: E402
+
+
+single_search_script = importlib.import_module("16_single_drone_person_search_land")
+
+
 @dataclass(frozen=True)
 class FakeDetection:
     ip: str
@@ -147,6 +157,40 @@ class SingleDroneSearchRunnerTests(unittest.TestCase):
         self.assertIn("stop", controller.commands)
         self.assertIn("land", controller.commands)
         self.assertNotIn("forward 20", controller.commands)
+
+    def test_first_reachable_registered_ip_skips_offline_drone(self) -> None:
+        class FakeProbeClient:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_value, traceback) -> None:
+                pass
+
+            def send_one(self, ip: str, command: str, **_kwargs):
+                if ip.endswith(".89"):
+                    raise TimeoutError("offline")
+                return object()
+
+        def fake_load_registered_ips():
+            return ["192.168.100.89", "192.168.100.90"]
+
+        def fake_query_battery(_client, ip: str, **_kwargs):
+            return (88, 3)
+
+        original_client = single_search_script.TelloUdpClient
+        original_load = single_search_script.load_registered_ips
+        original_query = single_search_script.query_battery
+        try:
+            single_search_script.TelloUdpClient = FakeProbeClient
+            single_search_script.load_registered_ips = fake_load_registered_ips
+            single_search_script.query_battery = fake_query_battery
+            selected = single_search_script._first_reachable_registered_ip(timeout=0.01, retries=1)
+        finally:
+            single_search_script.TelloUdpClient = original_client
+            single_search_script.load_registered_ips = original_load
+            single_search_script.query_battery = original_query
+
+        self.assertEqual(selected, "192.168.100.90")
 
 
 if __name__ == "__main__":

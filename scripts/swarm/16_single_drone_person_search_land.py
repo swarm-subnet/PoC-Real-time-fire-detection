@@ -27,7 +27,7 @@ from swarm_detector import (  # noqa: E402
     PersonDetectorConfig,
 )
 from swarm_single_search import SingleDroneSearchConfig, SingleDroneSearchRunner  # noqa: E402
-from swarm_utils import DEFAULT_DRONE_IPS_FILE, load_registered_ips, timestamp  # noqa: E402
+from swarm_utils import DEFAULT_DRONE_IPS_FILE, TelloUdpClient, load_registered_ips, query_battery, timestamp  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -37,8 +37,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "ip",
         nargs="?",
-        help="Drone IP. If omitted, uses the first IP in scripts/swarm/drone_ips.txt.",
+        help="Drone IP. If omitted, probes scripts/swarm/drone_ips.txt and uses the first reachable drone.",
     )
+    parser.add_argument("--probe-timeout", type=float, default=2.0, help="Per-drone probe timeout when no IP is supplied. Default: 2.")
+    parser.add_argument("--probe-retries", type=int, default=1, help="Per-drone probe retries when no IP is supplied. Default: 1.")
     parser.add_argument("--min-battery", type=int, default=20, help="Minimum battery for takeoff. Default: 20.")
     parser.add_argument("--status-retries", type=int, default=2, help="Preflight retries per command. Default: 2.")
     parser.add_argument("--max-search-seconds", type=float, default=90.0, help="Land after this many seconds if no person is confirmed.")
@@ -55,8 +57,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    ip = args.ip or _first_registered_ip()
     _validate_args(args)
+    ip = args.ip or _first_reachable_registered_ip(args.probe_timeout, args.probe_retries)
 
     config = SingleDroneSearchConfig(
         min_battery=args.min_battery,
@@ -85,11 +87,23 @@ def main() -> None:
     print(f"[{timestamp()}] Result: {outcome}; landed={result.landed}; reason={result.reason}", flush=True)
 
 
-def _first_registered_ip() -> str:
+def _first_reachable_registered_ip(timeout: float, retries: int) -> str:
     ips = load_registered_ips()
     if not ips:
         raise RuntimeError(f"No IP provided and no registered drones found in {DEFAULT_DRONE_IPS_FILE}.")
-    return ips[0]
+
+    print(f"[{timestamp()}] No IP supplied. Probing registered drones: {', '.join(ips)}", flush=True)
+    with TelloUdpClient() as client:
+        for ip in ips:
+            try:
+                print(f"[{timestamp()}] Probing {ip}...", flush=True)
+                client.send_one(ip, "command", timeout=timeout, retries=retries)
+                battery, _latency_ms = query_battery(client, ip, timeout=timeout, retries=retries)
+                print(f"[{timestamp()}] Selected reachable drone {ip}; battery={battery}%", flush=True)
+                return ip
+            except Exception as error:
+                print(f"[{timestamp()}] {ip} not reachable: {error}", flush=True)
+    raise RuntimeError("No registered drone responded to command/battery probe.")
 
 
 def _validate_args(args: argparse.Namespace) -> None:
@@ -97,6 +111,10 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--min-battery must be 0 or greater")
     if args.status_retries <= 0:
         raise ValueError("--status-retries must be greater than 0")
+    if args.probe_timeout <= 0:
+        raise ValueError("--probe-timeout must be greater than 0")
+    if args.probe_retries <= 0:
+        raise ValueError("--probe-retries must be greater than 0")
     if args.max_search_seconds <= 0:
         raise ValueError("--max-search-seconds must be greater than 0")
     if not (1 <= args.yaw_step_degrees <= 360):
